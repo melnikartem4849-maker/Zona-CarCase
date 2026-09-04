@@ -8,7 +8,7 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 
 
-TOKEN = os.getenv("8601173851:AAHPUhEvkjd-auijjsBLoXi4sUC62sW4qEQ")
+TOKEN = os.getenv("BOT_TOKEN")
 
 
 dp = Dispatcher()
