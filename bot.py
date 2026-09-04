@@ -1089,7 +1089,7 @@ async def main():
 
     if not TOKEN:
         raise RuntimeError(
-            "Не найден BOT_TOKEN. В CMD выполни: set BOT_TOKEN=ТВОЙ_НОВЫЙ_ТОКЕН"
+            "Не найден BOT_TOKEN. В CMD выполни: set BOT_TOKEN=Твой_Новый_Токен"
         )
 
     init_db()
@@ -1097,11 +1097,11 @@ async def main():
     logging.info("База: %s", os.path.abspath(DB_FILE))
 
     bot = Bot(token=TOKEN)
-    await dp.start_polling(bot)
 
-
-async def main():
     await bot.delete_webhook(drop_pending_updates=True)
+
     await dp.start_polling(bot)
 
-asyncio.run(main())
+
+if __name__ == "__main__":
+    asyncio.run(main())
