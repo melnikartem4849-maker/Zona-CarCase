@@ -5,6 +5,8 @@ import random
 import sqlite3
 import time
 from html import escape
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from aiogram import Bot, Dispatcher
 from aiogram.filters import CommandStart
@@ -1084,7 +1086,22 @@ async def back_menu(callback: CallbackQuery):
 # =========================================================
 # ЗАПУСК
 # =========================================================
+def run_web_server():
+    port = int(os.environ.get("PORT", 10000))
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"Bot is running!")
+
+        def log_message(self, format, *args):
+            pass
+
+    server = HTTPServer(("0.0.0.0", port), Handler)
+    server.serve_forever() 
 async def main():
+     threading.Thread(target=run_web_server, daemon=True).start()
     logging.basicConfig(level=logging.INFO)
 
     if not TOKEN:
