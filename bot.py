@@ -3,7 +3,8 @@ import logging
 import random
 import os
 from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode from aiogram import Bot, Dispatcher
+from aiogram.enums import ParseMode
+from aiogram import Bot, Dispatcher
 from aiogram.filters import CommandStart
 from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
@@ -170,7 +171,7 @@ async def open_case(callback: CallbackQuery):
     car = get_random_car()
 
     await callback.message.answer(
-        "🎉 <b>КЕЙС ОТКРЫТ!</b>\\n\\n"
+        "🎉 <b>КЕЙС ОТКРЫТ!</b>\n\n"
         f"🚘 <b>{car['name']}</b>\\n"
         f"🎯 Редкость: {car['rarity']}\\n"
         f"💰 Стоимость: {car['price']:,}₽\\n"
