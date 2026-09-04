@@ -6,7 +6,8 @@ from aiogram import Bot, Dispatcher
 from aiogram.filters import CommandStart
 from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
-
+from aiohttp import web
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 TOKEN = os.getenv("BOT_TOKEN")
 
@@ -280,17 +281,45 @@ async def back_menu(callback: CallbackQuery):
 
 
 # =========================
-# ЗАПУСК
+# ЗАПУСК WEBHOOK
 # =========================
 
-async def main():
+WEBHOOK_PATH = "/webhook"
+WEBHOOK_URL = "https://zona-carcase.onrender.com/webhook"
+WEBHOOK_SECRET = "zona_carcase_secret"
 
+async def main():
     logging.basicConfig(level=logging.INFO)
 
     bot = Bot(token=TOKEN)
 
-    await dp.start_polling(bot)
+    await bot.set_webhook(
+        WEBHOOK_URL,
+        secret_token=WEBHOOK_SECRET
+    )
 
+    app = web.Application()
+
+    webhook_handler = SimpleRequestHandler(
+        dispatcher=dp,
+        bot=bot,
+        secret_token=WEBHOOK_SECRET
+    )
+
+    webhook_handler.register(
+        app,
+        path=WEBHOOK_PATH
+    )
+
+    setup_application(app, dp, bot=bot)
+
+    port = int(os.getenv("PORT", "10000"))
+
+    web.run_app(
+        app,
+        host="0.0.0.0",
+        port=port
+    )
 
 if __name__ == "__main__":
     asyncio.run(main())
