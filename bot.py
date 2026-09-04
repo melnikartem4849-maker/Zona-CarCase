@@ -286,17 +286,21 @@ async def back_menu(callback: CallbackQuery):
 
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_URL = "https://zona-carcase.onrender.com/webhook"
-WEBHOOK_SECRET = "zona_carcase_secret"
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
+PORT = int(os.getenv("PORT", "10000"))
 
-async def main():
-    logging.basicConfig(level=logging.INFO)
+bot = Bot(token=TOKEN)
 
-    bot = Bot(token=TOKEN)
 
+async def on_startup(bot: Bot):
     await bot.set_webhook(
         WEBHOOK_URL,
         secret_token=WEBHOOK_SECRET
     )
+
+
+async def main():
+    dp.startup.register(on_startup)
 
     app = web.Application()
 
@@ -313,12 +317,24 @@ async def main():
 
     setup_application(app, dp, bot=bot)
 
-    port = int(os.getenv("PORT", "10000"))
+    runner = web.AppRunner(app)
+    await runner.setup()
 
-    web.run_app(
-        app,
-        host="0.0.0.0",
-        port=port
+    site = web.TCPSite(
+        runner,
+        "0.0.0.0",
+        PORT
+    )
+
+    await site.start()
+
+    logging.info(f"Webhook server started on port {PORT}")
+
+    await asyncio.Event().wait()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
     )
 
 if __name__ == "__main__":
