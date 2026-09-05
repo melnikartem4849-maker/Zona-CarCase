@@ -1087,11 +1087,12 @@ async def back_menu(callback: CallbackQuery):
 # ЗАПУСК
 # =========================================================
 def run_web_server():
-    port = int(os.environ.get("PORT", 10000))
+    port = int(os.environ.get("PORT", "10000"))
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.end_headers()
             self.wfile.write(b"Bot is running!")
 
@@ -1099,9 +1100,11 @@ def run_web_server():
             pass
 
     server = HTTPServer(("0.0.0.0", port), Handler)
-    server.serve_forever() 
+    logging.info("WEB SERVER: listening on 0.0.0.0:%s", port)
+    server.serve_forever()
+
+
 async def main():
-     threading.Thread(target=run_web_server, daemon=True).start()
     logging.basicConfig(level=logging.INFO)
 
     if not TOKEN:
@@ -1116,6 +1119,11 @@ async def main():
     bot = Bot(token=TOKEN)
 
     await bot.delete_webhook(drop_pending_updates=True)
+
+    threading.Thread(
+        target=run_web_server,
+        daemon=True
+    ).start()
 
     await dp.start_polling(bot)
 
