@@ -5,16 +5,15 @@ import random
 import sqlite3
 import time
 import threading
-import json
-from pathlib import Path
-
 import aiohttp
+from io import BytesIO
+from aiogram.types import BufferedInputFile
 from html import escape
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from aiogram import Bot, Dispatcher
 from aiogram.filters import CommandStart
-from aiogram.types import Message, CallbackQuery, BufferedInputFile
+from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 
 
@@ -442,89 +441,6 @@ BASE_PRICES = {
 }
 
 
-CAR_DATA_FILE = Path("car_data.json")
-CAR_DATA = {}
-if CAR_DATA_FILE.exists():
-    try:
-        _loaded = json.loads(CAR_DATA_FILE.read_text(encoding="utf-8"))
-        CAR_DATA = {int(x["id"]): x for x in _loaded}
-    except Exception:
-        CAR_DATA = {}
-
-PHOTO_DIR = Path("car_images")
-PHOTO_DIR.mkdir(exist_ok=True)
-PHOTO_META_FILE = PHOTO_DIR / "_sources.json"
-try:
-    PHOTO_META = json.loads(PHOTO_META_FILE.read_text(encoding="utf-8")) if PHOTO_META_FILE.exists() else {}
-except Exception:
-    PHOTO_META = {}
-
-async def get_car_photo(car):
-    """Download and cache a CC image from Wikimedia Commons for this exact model."""
-    path = PHOTO_DIR / f"{car['id']}.jpg"
-    if path.exists():
-        return path
-    query = f"{car['name']} automobile"
-    api = "https://commons.wikimedia.org/w/api.php"
-    params = {
-        "action": "query", "format": "json", "generator": "search",
-        "gsrsearch": query, "gsrnamespace": 6, "gsrlimit": 10,
-        "prop": "imageinfo", "iiprop": "url|mime|extmetadata"
-    }
-    try:
-        timeout = aiohttp.ClientTimeout(total=20)
-        async with aiohttp.ClientSession(timeout=timeout, headers={"User-Agent":"Zona_CarCase/1.0"}) as session:
-            async with session.get(api, params=params) as resp:
-                data = await resp.json()
-            candidates=[]
-            for page in data.get("query",{}).get("pages",{}).values():
-                info=(page.get("imageinfo") or [{}])[0]
-                url=info.get("url")
-                mime=info.get("mime","")
-                meta=info.get("extmetadata",{})
-                lic=(meta.get("LicenseShortName",{}).get("value") or "").lower()
-                if url and mime.startswith("image/") and ("cc by" in lic or "cc-by" in lic or "cc by-sa" in lic or "cc-by-sa" in lic):
-                    candidates.append((url, page.get("title",""), meta, lic))
-            if not candidates:
-                return None
-            url,title,meta,lic=candidates[0]
-            async with session.get(url) as resp:
-                raw=await resp.read()
-            if len(raw)<5000:
-                return None
-            path.write_bytes(raw)
-            author=meta.get("Artist",{}).get("value","")
-            desc=meta.get("ImageDescription",{}).get("value","")
-            PHOTO_META[str(car['id'])]={"title":title,"source":url,"author":author,"license":lic,"description":desc}
-            PHOTO_META_FILE.write_text(json.dumps(PHOTO_META,ensure_ascii=False,indent=2),encoding="utf-8")
-            return path
-    except Exception:
-        return None
-
-def car_caption(car, prefix=None, amount=None):
-    r=RARITIES[car["rarity"]]
-    lines=[]
-    if prefix: lines.append(prefix)
-    lines += [
-        f'{r["emoji"]} <b>{escape(car["rarity"])}</b>',
-        f'🚘 <b>{escape(car["name"])}</b>',
-        f'📅 Год: <b>{car["year"]}</b>',
-        f'⚡ Мощность: <b>{car["power"]} л.с.</b>',
-        f'💵 Цена: <b>{money(car["price"])}</b>',
-    ]
-    if amount is not None: lines.append(f'📦 В гараже: <b>{amount} шт.</b>')
-    meta=PHOTO_META.get(str(car["id"]))
-    if meta and meta.get("source"):
-        lines.append(f'📷 <a href="{meta["source"]}">Фото: Wikimedia Commons</a>')
-    return "\n".join(lines)
-
-async def send_car_card(bot, chat_id, car, prefix=None, amount=None, reply_markup=None):
-    photo=await get_car_photo(car)
-    caption=car_caption(car,prefix,amount)
-    if photo and photo.exists():
-        return await bot.send_photo(chat_id, photo=BufferedInputFile(photo.read_bytes(), filename=photo.name), caption=caption, reply_markup=reply_markup, parse_mode="HTML")
-    return await bot.send_message(chat_id, caption, reply_markup=reply_markup, parse_mode="HTML")
-
 def build_cars():
     names = [f"{brand} {model}" for brand, models in BRAND_MODELS.items() for model in models]
     total = len(names)
@@ -557,15 +473,13 @@ def build_cars():
         }[rarity]
         power = int(random.randint(90, 700) * random.uniform(*multiplier))
         price = int(BASE_PRICES[rarity] * random.uniform(0.85, 1.25))
-        car_id = index + 1
-        real = CAR_DATA.get(car_id, {})
         cars.append({
-            "id": car_id,
+            "id": index + 1,
             "name": name,
-            "year": real.get("year") or next((CAR_YEARS[b][m] for b, models in BRAND_MODELS.items() for m in models if f"{b} {m}" == name), 2020),
+            "year": next((CAR_YEARS[b][m] for b, models in BRAND_MODELS.items() for m in models if f"{b} {m}" == name), 2020),
             "rarity": rarity,
-            "power": real.get("power") or power,
-            "price": real.get("price") or price,
+            "power": power,
+            "price": price,
         })
 
     assert len(cars) == total == 306, f"Должно быть 306 машин, получено {len(cars)}"
@@ -575,6 +489,82 @@ def build_cars():
 CARS = build_cars()
 CARS_BY_ID = {car["id"]: car for car in CARS}
 CARS_BY_RARITY = {rarity: [c for c in CARS if c["rarity"] == rarity] for rarity in RARITY_ORDER}
+
+
+
+
+# =========================================================
+# ФОТО МАШИН ИЗ ИНТЕРНЕТА
+# =========================================================
+IMAGE_DIR = "car_images"
+os.makedirs(IMAGE_DIR, exist_ok=True)
+
+def car_make_model(car):
+    name = car["name"]
+    # Названия в старой базе начинаются с марки.
+    known = sorted(BRAND_MODELS.keys(), key=len, reverse=True)
+    for brand in known:
+        if name.startswith(brand + " "):
+            return brand, name[len(brand) + 1:]
+    parts = name.split(" ", 1)
+    return parts[0], parts[1] if len(parts) > 1 else parts[0]
+
+async def fetch_car_photo(car):
+    """Берёт реальное фото модели через Wikimedia Commons и кэширует его."""
+    safe = "".join(ch if ch.isalnum() else "_" for ch in car["name"].lower())
+    path = os.path.join(IMAGE_DIR, f"{car['id']}_{safe}.jpg")
+    if os.path.exists(path) and os.path.getsize(path) > 5000:
+        return path
+
+    make, model = car_make_model(car)
+    url = "https://carapi.trustcar.info/getImage"
+    params = {"make": make, "model": model, "year": str(car["year"])}
+    headers = {"User-Agent": "Zona_CarCase/2.0 (Telegram bot; contact via Telegram)"}
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=20)
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+            async with session.get(url, params=params, allow_redirects=True) as resp:
+                content_type = resp.headers.get("Content-Type", "")
+                if resp.status != 200 or not content_type.startswith("image/"):
+                    return None
+                data = await resp.read()
+                if len(data) < 5000:
+                    return None
+                with open(path, "wb") as f:
+                    f.write(data)
+                return path
+    except Exception:
+        logging.exception("Не удалось получить фото %s", car["name"])
+        return None
+
+def car_card_text(car, prefix="🚗 МАШИНА"):
+    r = RARITIES[car["rarity"]]
+    return (
+        f"<b>{prefix}</b>\n\n"
+        f"{r['emoji']} <b>{escape(car['name'])}</b>\n"
+        f"💎 Редкость: <b>{escape(car['rarity'])}</b>\n"
+        f"📅 Год: <b>{car['year']}</b>\n"
+        f"⚡ Мощность: <b>{car['power']} л.с.</b>\n"
+        f"💰 Цена: <b>{money(car['price'])}</b>"
+    )
+
+async def send_car_photo(bot, chat_id, car, prefix="🚗 МАШИНА", reply_markup=None):
+    path = await fetch_car_photo(car)
+    text = car_card_text(car, prefix)
+    if path:
+        with open(path, "rb") as f:
+            data = f.read()
+        await bot.send_photo(
+            chat_id,
+            BufferedInputFile(data, filename=os.path.basename(path)),
+            caption=text,
+            reply_markup=reply_markup,
+            parse_mode="HTML",
+        )
+        return True
+    await bot.send_message(chat_id, text + "\n\n🖼 Фото временно недоступно.", reply_markup=reply_markup, parse_mode="HTML")
+    return False
 
 
 # =========================================================
@@ -886,6 +876,7 @@ async def auction_loop(bot):
                         "🚘 Машина добавлена в гараж!",
                         parse_mode="HTML"
                     )
+                    await send_car_photo(bot, winner_id, car, "🏆 АУКЦИОН — ТВОЯ МАШИНА")
                 except Exception:
                     pass
             auction = get_auction()
@@ -1239,20 +1230,15 @@ async def open_case(callback: CallbackQuery):
         if row and row["amount"] > 1:
             duplicate_text = f"\n📦 Теперь этой машины у тебя: <b>{row['amount']} шт.</b>"
 
-    await callback.message.answer(
-        "🎉 <b>КЕЙС ОТКРЫТ!</b>\n\n"
-        f'{r["emoji"]} <b>{escape(car["rarity"])}</b>\n'
-        f'🚘 <b>{escape(car["name"])}</b>\n'
-        f'📅 Год выпуска: <b>{car["year"]}</b>\n'
-        f'⚡ Мощность: <b>{car["power"]} л.с.</b>\n'
-        f'💎 Цена машины: <b>{money(car["price"])}</b>\n'
-        f'🎯 Шанс редкости: <b>{r["chance"]}%</b>'
-        f'{duplicate_text}\n\n'
-        "🏠 Машина автоматически добавлена в гараж.",
-        parse_mode="HTML"
+    await send_car_photo(
+        callback.bot,
+        callback.message.chat.id,
+        car,
+        "🎉 КЕЙС ОТКРЫТ — ВЫПАЛА МАШИНА!",
     )
+    if duplicate_text:
+        await callback.message.answer(duplicate_text.strip(), parse_mode="HTML")
     await callback.answer("🚘 Машина добавлена в гараж!")
-    await send_car_card(callback.bot, callback.message.chat.id, car, "🖼️ Фото выпавшей машины", amount=(row["amount"] if row else None))
 
 
 @dp.message(lambda m: m.text == "📦 Контейнеры")
@@ -1407,19 +1393,15 @@ async def container_open(callback: CallbackQuery):
     add_car(callback.from_user.id, car["id"])
     add_xp(callback.from_user.id, 150)
     r = RARITIES[car["rarity"]]
-    await callback.message.edit_text(
-        "🎉 <b>КОНТЕЙНЕР ОТКРЫТ!</b>\n\n"
-        f'{r["emoji"]} <b>{escape(car["rarity"])}</b>\n'
-        f'🚘 <b>{escape(car["name"])}</b>\n'
-        f'📅 Год: <b>{car["year"]}</b>\n'
-        f'⚡ Мощность: <b>{car["power"]} л.с.</b>\n'
-        f'💎 Цена: <b>{money(car["price"])}</b>\n\n'
-        "🏠 Машина добавлена в гараж.",
+    await callback.message.delete()
+    await send_car_photo(
+        callback.bot,
+        callback.message.chat.id,
+        car,
+        f"🎉 {c['emoji']} КОНТЕЙНЕР ОТКРЫТ — ВЫПАЛА МАШИНА!",
         reply_markup=containers_keyboard(callback.from_user.id),
-        parse_mode="HTML"
     )
     await callback.answer("🚘 Машина добавлена в гараж!")
-    await send_car_card(callback.bot, callback.message.chat.id, car, "🖼️ Фото выпавшей машины")
 
 
 @dp.callback_query(lambda c: c.data.startswith("exclusive:car:"))
@@ -1436,15 +1418,13 @@ async def exclusive_car_info(callback: CallbackQuery):
         ).fetchone()
     amount = row["amount"] if row else 0
     r = RARITIES[car["rarity"]]
-    await callback.message.edit_text(
-        f'{r["emoji"]} <b>{escape(car["name"])}</b>\n\n'
-        f'⭐ Редкость: <b>{escape(car["rarity"])}</b>\n'
-        f'📅 Год: <b>{car["year"]}</b>\n'
-        f'⚡ Мощность: <b>{car["power"]} л.с.</b>\n'
-        f'💎 Стоимость: <b>{money(car["price"])}</b>\n'
-        f'📦 В гараже: <b>{amount} шт.</b>',
+    await callback.message.delete()
+    await send_car_photo(
+        callback.bot,
+        callback.message.chat.id,
+        car,
+        "🔴 ЭКСКЛЮЗИВНАЯ МАШИНА",
         reply_markup=exclusive_keyboard(),
-        parse_mode="HTML"
     )
     await callback.answer()
 
@@ -1547,10 +1527,16 @@ async def car_info(callback: CallbackQuery):
         await callback.answer("Этой машины уже нет в гараже.", show_alert=True)
         return
 
-    await send_car_card(callback.bot, callback.message.chat.id, car, "📖 Машина из коллекции", amount=row["amount"], reply_markup=car_keyboard(car_id))
+    r = RARITIES[car["rarity"]]
+    await callback.message.delete()
+    await send_car_photo(
+        callback.bot,
+        callback.message.chat.id,
+        car,
+        "📖 МАШИНА В КОЛЛЕКЦИИ",
+        reply_markup=car_keyboard(car_id),
+    )
     await callback.answer()
-    return
-
 
 
 @dp.callback_query(lambda c: c.data.startswith("sell:"))
@@ -1673,7 +1659,7 @@ async def referral(message: Message):
     await message.answer(
         "👥 <b>РЕФЕРАЛЬНАЯ СИСТЕМА</b>\n\n"
         f"🔗 Твоя ссылка:\n"
-        f"<code>https://t.me/ZonaCarCaseBot?start={user_id}</code>\n\n"
+        f"<code>https://t.me/{(await message.bot.me()).username}?start={user_id}</code>\n\n"
         "👤 Приглашено: 0\n"
         "💰 Заработано: 0$",
         parse_mode="HTML"
