@@ -25,7 +25,10 @@ TOKEN = os.getenv("BOT_TOKEN")
 DB_FILE = "zonacarcase.db"
 CASE_PRICE = 1_200_000
 CASE_COOLDOWN = 3 * 60 * 60  # 3 часа
-CONTAINER_COOLDOWN = 1 * 60 * 60  # 1 час
+AUCTION_INTERVAL = 60 * 60  # новый лот каждый час
+AUCTION_BID_TIME = 60  # 1 минута после каждой ставки
+AUCTION_MIN_BID = 1_000_000
+AUCTION_BID_STEP = 500_000
 
 # Контейнеры: покупаются отдельно от обычного кейса.
 # Внутри каждого контейнера выпадает 1 машина из указанных редкостей.
@@ -498,8 +501,7 @@ def init_db():
                 balance INTEGER NOT NULL DEFAULT 5000000,
                 cases_opened INTEGER NOT NULL DEFAULT 0,
                 xp INTEGER NOT NULL DEFAULT 0,
-                last_case_opened REAL NOT NULL DEFAULT 0,
-                last_container_opened REAL NOT NULL DEFAULT 0
+                last_case_opened REAL NOT NULL DEFAULT 0
             )
         """)
         conn.execute("""
@@ -518,13 +520,26 @@ def init_db():
                 PRIMARY KEY (user_id, container_id)
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS auction (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                car_id INTEGER NOT NULL,
+                current_bid INTEGER NOT NULL DEFAULT 0,
+                bidder_id INTEGER,
+                ends_at REAL NOT NULL DEFAULT 0,
+                created_at REAL NOT NULL DEFAULT 0,
+                active INTEGER NOT NULL DEFAULT 1
+            )
+        """)
 
         # Если база была создана старой версией бота, добавляем колонку КД.
+        auction_columns = [row[1] for row in conn.execute("PRAGMA table_info(auction)").fetchall()]
+        if "created_at" not in auction_columns:
+            conn.execute("ALTER TABLE auction ADD COLUMN created_at REAL NOT NULL DEFAULT 0")
+
         columns = [row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()]
         if "last_case_opened" not in columns:
             conn.execute("ALTER TABLE users ADD COLUMN last_case_opened REAL NOT NULL DEFAULT 0")
-        if "last_container_opened" not in columns:
-            conn.execute("ALTER TABLE users ADD COLUMN last_container_opened REAL NOT NULL DEFAULT 0")
 
 
 def ensure_user(user_id):
@@ -670,6 +685,126 @@ def sell_car(user_id, car_id, amount=1):
 
 
 # =========================================================
+# АУКЦИОН ЭКСКЛЮЗИВНЫХ МАШИН
+# =========================================================
+def get_auction():
+    with db() as conn:
+        return conn.execute("SELECT * FROM auction WHERE id=1").fetchone()
+
+
+def start_new_auction():
+    cars = CARS_BY_RARITY["Exclusive"]
+    if not cars:
+        return None
+    car = random.choice(cars)
+    with db() as conn:
+        conn.execute("""
+            INSERT INTO auction(id, car_id, current_bid, bidder_id, ends_at, created_at, active)
+            VALUES (1, ?, 0, NULL, 0, ?, 1)
+            ON CONFLICT(id) DO UPDATE SET
+                car_id=excluded.car_id,
+                current_bid=0,
+                bidder_id=NULL,
+                ends_at=0,
+                active=1
+        """, (car["id"],))
+    return car
+
+
+def auction_text(auction):
+    if not auction:
+        return "🔴 <b>ЭКСКЛЮЗИВНЫЙ АУКЦИОН</b>\n\nЛот скоро появится."
+    car = CARS_BY_ID.get(auction["car_id"])
+    if not car:
+        return "🔴 <b>ЭКСКЛЮЗИВНЫЙ АУКЦИОН</b>\n\nЛот не найден."
+    bid = auction["current_bid"]
+    if auction["bidder_id"] and auction["ends_at"] > time.time():
+        left = max(0, int(auction["ends_at"] - time.time()))
+        timer = f"⏳ До окончания ставки: <b>00:{left:02d}</b>"
+    else:
+        timer = "⏳ Ставок пока нет — поставь первую ставку."
+    bid_text = money(bid) if bid else "нет ставок"
+    next_bid = AUCTION_MIN_BID if bid == 0 else bid + AUCTION_BID_STEP
+    return (
+        "🔴 <b>ЭКСКЛЮЗИВНЫЙ АУКЦИОН</b>\n"
+        "━━━━━━━━━━━━━━\n\n"
+        f"🚘 <b>{escape(car['name'])}</b>\n"
+        f"📅 Год: <b>{car['year']}</b>\n"
+        f"⚡ Мощность: <b>{car['power']} л.с.</b>\n"
+        f"💎 Стоимость машины: <b>{money(car['price'])}</b>\n\n"
+        f"💰 Текущая ставка: <b>{bid_text}</b>\n"
+        f"⬆️ Следующая ставка: <b>{money(next_bid)}</b>\n"
+        f"{timer}\n\n"
+        "🏆 Победитель получает машину в гараж.\n"
+        "💸 Деньги за лот списываются только после победы."
+    )
+
+
+def auction_keyboard(auction):
+    kb = InlineKeyboardBuilder()
+    if auction:
+        bid = auction["current_bid"]
+        next_bid = AUCTION_MIN_BID if bid == 0 else bid + AUCTION_BID_STEP
+        kb.button(text=f"💰 Ставка {money(next_bid)}", callback_data="auction:bid")
+    kb.button(text="🔄 Обновить", callback_data="auction:show")
+    kb.button(text="⬅️ Контейнеры", callback_data="containers:list")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+async def finish_auction():
+    auction = get_auction()
+    if not auction or not auction["active"] or not auction["bidder_id"]:
+        return False
+    if auction["ends_at"] > time.time():
+        return False
+    car = CARS_BY_ID.get(auction["car_id"])
+    if not car:
+        return False
+    winner_id = auction["bidder_id"]
+    bid = auction["current_bid"]
+    user = get_user(winner_id)
+    if user["balance"] < bid:
+        with db() as conn:
+            conn.execute("UPDATE auction SET active=0 WHERE id=1")
+        return False
+    with db() as conn:
+        conn.execute("UPDATE users SET balance=balance-? WHERE user_id=?", (bid, winner_id))
+        conn.execute("UPDATE auction SET active=0 WHERE id=1")
+    add_car(winner_id, car["id"])
+    add_xp(winner_id, 300)
+    return winner_id, car, bid
+
+
+async def auction_loop(bot):
+    while True:
+        try:
+            result = await finish_auction()
+            if result:
+                winner_id, car, bid = result
+                try:
+                    await bot.send_message(
+                        winner_id,
+                        "🏆 <b>ТЫ ПОБЕДИЛ В АУКЦИОНЕ!</b>\n\n"
+                        f"🔴 {escape(car['name'])}\n"
+                        f"💰 Ставка: <b>{money(bid)}</b>\n"
+                        "🚘 Машина добавлена в гараж!",
+                        parse_mode="HTML"
+                    )
+                except Exception:
+                    pass
+            auction = get_auction()
+            now = time.time()
+            if not auction or not auction["active"] or now - auction["created_at"] >= AUCTION_INTERVAL:
+                if auction and auction["active"] and auction["bidder_id"]:
+                    await finish_auction()
+                start_new_auction()
+        except Exception:
+            logging.exception("Ошибка аукциона")
+        await asyncio.sleep(1)
+
+
+# =========================================================
 # КЛАВИАТУРЫ
 # =========================================================
 def main_keyboard():
@@ -723,13 +858,9 @@ def containers_keyboard(user_id):
 
 def exclusive_keyboard():
     kb = containers_tabs("exclusive")
-    for car in exclusive_cars():
-        kb.button(
-            text=f'{RARITIES[car["rarity"]]["emoji"]} {car["name"]}',
-            callback_data=f'exclusive:car:{car["id"]}'
-        )
+    kb.button(text="🔴 Открыть текущий аукцион", callback_data="auction:show")
     kb.button(text="🏠 Меню", callback_data="back_menu")
-    kb.adjust(2, 1)
+    kb.adjust(1)
     return kb.as_markup()
 
 
@@ -995,14 +1126,65 @@ async def containers_list_callback(callback: CallbackQuery):
 
 @dp.callback_query(lambda c: c.data == "containers:exclusive")
 async def containers_exclusive_callback(callback: CallbackQuery):
+    auction = get_auction()
     await callback.message.edit_text(
-        "🔴 <b>ЭКСКЛЮЗИВНЫЕ МАШИНЫ</b>\n\n"
-        "Здесь собраны все Exclusive и Secret машины.\n"
-        "Нажми на машину, чтобы посмотреть её характеристики и наличие в гараже.",
-        reply_markup=exclusive_keyboard(),
+        auction_text(auction),
+        reply_markup=auction_keyboard(auction),
         parse_mode="HTML"
     )
     await callback.answer()
+
+
+@dp.callback_query(lambda c: c.data == "auction:show")
+async def auction_show(callback: CallbackQuery):
+    auction = get_auction()
+    if not auction or not auction["active"]:
+        start_new_auction()
+        auction = get_auction()
+    await callback.message.edit_text(
+        auction_text(auction),
+        reply_markup=auction_keyboard(auction),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@dp.callback_query(lambda c: c.data == "auction:bid")
+async def auction_bid(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    auction = get_auction()
+    if not auction or not auction["active"]:
+        await callback.answer("Лот уже завершён. Жди следующий.", show_alert=True)
+        return
+
+    # Если старая ставка уже закончилась — сначала завершаем лот.
+    if auction["bidder_id"] and auction["ends_at"] <= time.time():
+        result = await finish_auction()
+        if result:
+            await callback.answer("Аукцион уже завершён. Машина ушла победителю.", show_alert=True)
+        else:
+            await callback.answer("Аукцион уже завершён.", show_alert=True)
+        return
+
+    current = auction["current_bid"]
+    next_bid = AUCTION_MIN_BID if current == 0 else current + AUCTION_BID_STEP
+    user = get_user(user_id)
+    if user["balance"] < next_bid:
+        await callback.answer(f"Нужно минимум {money(next_bid)}.", show_alert=True)
+        return
+
+    with db() as conn:
+        conn.execute(
+            "UPDATE auction SET current_bid=?, bidder_id=?, ends_at=?, active=1 WHERE id=1",
+            (next_bid, user_id, time.time() + AUCTION_BID_TIME)
+        )
+    await callback.answer("💰 Ставка принята! Отсчёт 1 минута.")
+    auction = get_auction()
+    await callback.message.edit_text(
+        auction_text(auction),
+        reply_markup=auction_keyboard(auction),
+        parse_mode="HTML"
+    )
 
 
 @dp.callback_query(lambda c: c.data.startswith("container:info:"))
@@ -1064,32 +1246,10 @@ async def container_open(callback: CallbackQuery):
     if not c:
         await callback.answer("Контейнер не найден.", show_alert=True)
         return
-    user = get_user(callback.from_user.id)
-    now = time.time()
-    last_container = user["last_container_opened"] or 0
-    remaining = CONTAINER_COOLDOWN - (now - last_container)
-
-    if remaining > 0:
-        minutes = int(remaining // 60)
-        seconds = int(remaining % 60)
-        hours = minutes // 60
-        minutes %= 60
-        await callback.answer(
-            f"⏳ Контейнеры на КД. Осталось: {hours:02d}:{minutes:02d}:{seconds:02d}",
-            show_alert=True
-        )
-        return
-
     if get_container_amount(callback.from_user.id, container_id) <= 0:
         await callback.answer("У тебя нет такого контейнера.", show_alert=True)
         return
-
     remove_container(callback.from_user.id, container_id, 1)
-    with db() as conn:
-        conn.execute(
-            "UPDATE users SET last_container_opened=? WHERE user_id=?",
-            (now, callback.from_user.id)
-        )
     car = choose_container_car(container_id)
     add_car(callback.from_user.id, car["id"])
     add_xp(callback.from_user.id, 150)
@@ -1427,6 +1587,10 @@ async def main():
         target=run_web_server,
         daemon=True
     ).start()
+
+    if not get_auction():
+        start_new_auction()
+    asyncio.create_task(auction_loop(bot))
 
     await dp.start_polling(bot)
 
