@@ -707,7 +707,7 @@ def start_new_auction():
                 bidder_id=NULL,
                 ends_at=0,
                 active=1
-        """, (car["id"],))
+        """, (car["id"], time.time()))
     return car
 
 
