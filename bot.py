@@ -10,7 +10,9 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from aiogram import Bot, Dispatcher
 from aiogram.filters import CommandStart
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, BufferedInputFile
+from PIL import Image, ImageDraw, ImageFont
+import io
 from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 
 
@@ -33,6 +35,12 @@ AUCTION_BID_TIME = 60  # 1 минута после каждой ставки
 AUCTION_MIN_BID = 1_000_000
 AUCTION_BID_STEP = 500_000
 ADMIN_ID = 5474546385
+
+# =========================================================
+# СЕЗОН
+# =========================================================
+SEASON_NUMBER = 1
+SEASON_START = "2025-06-01"
 
 # Контейнеры: покупаются отдельно от обычного кейса.
 # Внутри каждого контейнера выпадает 1 машина из указанных редкостей.
@@ -1561,16 +1569,94 @@ async def quests(message: Message):
     )
 
 
+def _season_font(size, bold=False):
+    paths = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+    ]
+    for path in paths:
+        if os.path.exists(path):
+            return ImageFont.truetype(path, size)
+    return ImageFont.load_default()
+
+
+def make_season_image(rows):
+    width, height = 1000, 900
+    image = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(image)
+    top = 285
+
+    # Верхняя часть в стиле карточки со скриншота.
+    draw.rectangle((0, 0, width, top), fill=(11, 21, 31))
+    for x in (120, 320, 500, 680, 880):
+        draw.polygon([(x-25, 0), (x+25, 0), (x+155, top), (x-155, top)], fill=(20, 34, 47))
+    draw.ellipse((50, 180, 950, 430), fill=(18, 27, 34))
+    draw.rectangle((0, 245, width, top), fill=(20, 29, 35))
+    draw.rectangle((170, 215, 370, 285), fill=(48, 48, 45), outline=(105, 100, 90), width=2)
+    draw.rectangle((400, 160, 600, 285), fill=(50, 50, 46), outline=(110, 105, 92), width=2)
+    draw.rectangle((630, 220, 830, 285), fill=(48, 48, 45), outline=(105, 100, 90), width=2)
+    draw.text((270, 250), "2", font=_season_font(56), fill=(245, 225, 180), anchor="mm")
+    draw.text((500, 220), "1", font=_season_font(72), fill=(245, 225, 180), anchor="mm")
+    draw.text((730, 250), "3", font=_season_font(56), fill=(245, 225, 180), anchor="mm")
+    for x, y, size in ((250, 100, 45), (500, 55, 66), (750, 110, 48)):
+        draw.text((x, y), "?", font=_season_font(size), fill=(245, 225, 180), anchor="mm")
+
+    y = top + 24
+    draw.text((28, y), f"Сезон {SEASON_NUMBER}", font=_season_font(30, True), fill="black")
+    draw.text((28, y + 45), f"Старт: {SEASON_START}", font=_season_font(24), fill="black")
+    y += 105
+    draw.text((28, y), "Лидерборд сезона:", font=_season_font(25, True), fill="black")
+    y += 48
+
+    for index, (name, xp, cases) in enumerate(rows[:10]):
+        rank = f"{index + 1}."
+        draw.text((28, y), rank, font=_season_font(20, True), fill="black")
+        name = str(name)[:22]
+        draw.text((78, y), name, font=_season_font(20, True), fill=(25, 130, 220))
+        name_w = draw.textbbox((0, 0), name, font=_season_font(20, True))[2]
+        score = f": {xp:,} XP".replace(",", " ")
+        draw.text((78 + name_w + 10, y), score, font=_season_font(20), fill="black")
+        score_w = draw.textbbox((0, 0), score, font=_season_font(20))[2]
+        reward = f"  |  {cases} кейсов"
+        draw.text((78 + name_w + score_w + 16, y), reward, font=_season_font(19), fill="black")
+        y += 31
+
+    y += 22
+    draw.text((28, y), "Призы выдаются автоматически в конце сезона.", font=_season_font(19), fill="black")
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    return output.getvalue()
+
+
 @dp.message(lambda m: m.text == "🏆 Сезон")
 async def season(message: Message):
-    user = get_user(message.from_user.id)
-    level = user["xp"] // 1000 + 1
-    current = user["xp"] % 1000
-    await message.answer(
-        "🏆 <b>СЕЗОН</b>\n\n"
-        f"⭐ Уровень: <b>{level}</b>\n"
-        f"✨ Опыт: <b>{current}/1000</b>\n\n"
-        "🎁 За каждый открытый кейс: +100 XP",
+    with db() as conn:
+        top = conn.execute(
+            "SELECT user_id, xp, cases_opened FROM users ORDER BY xp DESC, cases_opened DESC LIMIT 10"
+        ).fetchall()
+
+    rows = []
+    for row in top:
+        user_id = row["user_id"]
+        name = f"Игрок {user_id}"
+        try:
+            chat = await message.bot.get_chat(user_id)
+            if getattr(chat, "username", None):
+                name = "@" + chat.username
+            elif getattr(chat, "first_name", None):
+                name = chat.first_name
+        except Exception:
+            pass
+        rows.append((name, row["xp"], row["cases_opened"]))
+
+    image_bytes = make_season_image(rows)
+    await message.answer_photo(
+        BufferedInputFile(image_bytes, filename=f"season_{SEASON_NUMBER}.png"),
+        caption=(
+            f"🏆 <b>Сезон {SEASON_NUMBER}</b>\n\n"
+            f"📅 Старт: <b>{SEASON_START}</b>\n"
+            "🎁 За каждый открытый кейс: +100 XP"
+        ),
         parse_mode="HTML"
     )
 
