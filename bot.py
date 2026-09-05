@@ -14,6 +14,9 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 
 
+dp = Dispatcher()
+
+
 # =========================================================
 # НАСТРОЙКИ
 # =========================================================
@@ -1018,10 +1021,8 @@ def garage_summary(user_id):
 
 
 # =========================================================
-# DISPATCHER
+# HANDLERS
 # =========================================================
-dp = Dispatcher()
-
 
 @dp.message(CommandStart())
 async def start(message: Message):
