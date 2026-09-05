@@ -707,7 +707,7 @@ def start_new_auction():
                 bidder_id=NULL,
                 ends_at=0,
                 active=1
-        """, (car["id"], time.time()))
+        """, (car["id"],))
     return car
 
 
@@ -766,11 +766,11 @@ async def finish_auction():
     user = get_user(winner_id)
     if user["balance"] < bid:
         with db() as conn:
-            conn.execute("UPDATE auction SET active=0 WHERE id=1")
+            conn.execute("UPDATE auction SET active=0, created_at=? WHERE id=1", (time.time(),))
         return False
     with db() as conn:
         conn.execute("UPDATE users SET balance=balance-? WHERE user_id=?", (bid, winner_id))
-        conn.execute("UPDATE auction SET active=0 WHERE id=1")
+        conn.execute("UPDATE auction SET active=0, created_at=? WHERE id=1", (time.time(),))
     add_car(winner_id, car["id"])
     add_xp(winner_id, 300)
     return winner_id, car, bid
@@ -802,6 +802,60 @@ async def auction_loop(bot):
         except Exception:
             logging.exception("Ошибка аукциона")
         await asyncio.sleep(1)
+
+
+# =========================================================
+# АДМИН-ПАНЕЛЬ
+# =========================================================
+def is_admin(user_id):
+    return user_id == ADMIN_ID
+
+def admin_keyboard():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📊 Статистика", callback_data="admin:stats")
+    kb.button(text="🔴 Текущий аукцион", callback_data="admin:auction")
+    kb.button(text="🚘 Новый аукцион", callback_data="admin:new_auction")
+    kb.adjust(1)
+    return kb.as_markup()
+
+@dp.message(Command("admin"))
+async def admin_panel(message: Message):
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ У тебя нет доступа к админ-панели.")
+        return
+    await message.answer("👑 <b>АДМИН-ПАНЕЛЬ</b>\n\nВыбери действие:", reply_markup=admin_keyboard(), parse_mode="HTML")
+
+@dp.message(Command("myid"))
+async def my_id(message: Message):
+    await message.answer(f"🆔 Твой Telegram ID: <code>{message.from_user.id}</code>", parse_mode="HTML")
+
+@dp.callback_query(lambda c: c.data.startswith("admin:"))
+async def admin_actions(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+    action = callback.data.split(":", 1)[1]
+    if action == "stats":
+        with db() as conn:
+            users_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+            cars_count = conn.execute("SELECT COUNT(*) FROM garage").fetchone()[0]
+            balance = conn.execute("SELECT COALESCE(SUM(balance),0) FROM users").fetchone()[0]
+        await callback.message.edit_text(
+            "📊 <b>СТАТИСТИКА БОТА</b>\n\n"
+            f"👥 Игроков: <b>{users_count}</b>\n"
+            f"🚘 Машин в гаражах: <b>{cars_count}</b>\n"
+            f"💰 Общий баланс игроков: <b>{money(balance)}</b>",
+            reply_markup=admin_keyboard(), parse_mode="HTML"
+        )
+    elif action == "auction":
+        auction = get_auction()
+        text = auction_text(auction) if auction and auction["active"] else "🔴 Щечас нет активного аукциона!\nЖди завоза."
+        await callback.message.edit_text(text, reply_markup=admin_keyboard(), parse_mode="HTML")
+    elif action == "new_auction":
+        start_new_auction()
+        auction = get_auction()
+        await callback.message.edit_text("✅ <b>Новый аукцион создан!</b>\n\n" + auction_text(auction), reply_markup=admin_keyboard(), parse_mode="HTML")
+    await callback.answer()
 
 
 # =========================================================
@@ -1139,8 +1193,8 @@ async def containers_exclusive_callback(callback: CallbackQuery):
 async def auction_show(callback: CallbackQuery):
     auction = get_auction()
     if not auction or not auction["active"]:
-        start_new_auction()
-        auction = get_auction()
+        await callback.answer("🔴 Щечас нет активного аукциона! Жди завоза", show_alert=True)
+        return
     await callback.message.edit_text(
         auction_text(auction),
         reply_markup=auction_keyboard(auction),
