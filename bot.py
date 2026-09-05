@@ -1312,18 +1312,62 @@ async def quests(message: Message):
     )
 
 
+def get_season_top(limit=10):
+    with db() as conn:
+        return conn.execute(
+            "SELECT user_id, balance, xp, cases_opened FROM users "
+            "ORDER BY balance DESC, xp DESC, cases_opened DESC LIMIT ?",
+            (limit,)
+        ).fetchall()
+
+
 @dp.message(lambda m: m.text == "🏆 Сезон")
 async def season(message: Message):
     user = get_user(message.from_user.id)
     level = user["xp"] // 1000 + 1
     current = user["xp"] % 1000
-    await message.answer(
-        "🏆 <b>СЕЗОН</b>\n\n"
-        f"⭐ Уровень: <b>{level}</b>\n"
-        f"✨ Опыт: <b>{current}/1000</b>\n\n"
-        "🎁 За каждый открытый кейс: +100 XP",
-        parse_mode="HTML"
-    )
+
+    lines = [
+        "🏆 <b>СЕЗОННЫЙ ЛИДЕР БОРД</b>",
+        "━━━━━━━━━━━━━━━━━━",
+        "💰 <i>Топ игроков по балансу</i>",
+        ""
+    ]
+
+    top = get_season_top(10)
+    medals = ["🥇", "🥈", "🥉"]
+
+    for index, row in enumerate(top, start=1):
+        try:
+            chat = await message.bot.get_chat(row["user_id"])
+            if chat.username:
+                name = f"@{escape(chat.username)}"
+            elif chat.first_name:
+                name = escape(chat.first_name)
+            else:
+                name = f"Игрок {row['user_id']}"
+        except Exception:
+            name = f"Игрок {row['user_id']}"
+
+        prefix = medals[index - 1] if index <= 3 else f"<b>{index}.</b>"
+        lines.append(
+            f"{prefix} {name}: <b>{money(row['balance'])}</b>"
+        )
+
+    if not top:
+        lines.append("Пока никто не попал в рейтинг.")
+
+    lines.extend([
+        "",
+        "━━━━━━━━━━━━━━━━━━",
+        f"⭐ Твой уровень: <b>{level}</b>",
+        f"✨ Твой опыт: <b>{current}/1000 XP</b>",
+        f"🎁 Кейсов открыто: <b>{user['cases_opened']}</b>",
+        "",
+        "🔥 Играй, открывай кейсы и поднимайся в топ!"
+    ])
+
+    await message.answer("\n".join(lines), parse_mode="HTML")
 
 
 @dp.message(lambda m: m.text == "🎁 Промокод")
