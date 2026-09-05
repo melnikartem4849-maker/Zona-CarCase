@@ -32,6 +32,7 @@ AUCTION_INTERVAL = 60 * 60  # новый лот каждый час
 AUCTION_BID_TIME = 60  # 1 минута после каждой ставки
 AUCTION_MIN_BID = 1_000_000
 AUCTION_BID_STEP = 500_000
+ADMIN_ID = 5474546385
 
 # Контейнеры: покупаются отдельно от обычного кейса.
 # Внутри каждого контейнера выпадает 1 машина из указанных редкостей.
@@ -798,9 +799,14 @@ async def auction_loop(bot):
                     pass
             auction = get_auction()
             now = time.time()
-            if not auction or not auction["active"] or now - auction["created_at"] >= AUCTION_INTERVAL:
-                if auction and auction["active"] and auction["bidder_id"]:
-                    await finish_auction()
+            if not auction:
+                start_new_auction()
+            elif not auction["active"]:
+                # После победы оставляем аукцион неактивным на час.
+                if now - auction["created_at"] >= AUCTION_INTERVAL:
+                    start_new_auction()
+            elif now - auction["created_at"] >= AUCTION_INTERVAL and not auction["bidder_id"]:
+                # Если за час никто не сделал ставку — запускаем новый лот.
                 start_new_auction()
         except Exception:
             logging.exception("Ошибка аукциона")
@@ -821,14 +827,14 @@ def admin_keyboard():
     kb.adjust(1)
     return kb.as_markup()
 
-@dp.message(Command("admin"))
+@dp.message(lambda message: message.text == "/admin")
 async def admin_panel(message: Message):
     if not is_admin(message.from_user.id):
         await message.answer("⛔ У тебя нет доступа к админ-панели.")
         return
     await message.answer("👑 <b>АДМИН-ПАНЕЛЬ</b>\n\nВыбери действие:", reply_markup=admin_keyboard(), parse_mode="HTML")
 
-@dp.message(Command("myid"))
+@dp.message(lambda message: message.text == "/myid")
 async def my_id(message: Message):
     await message.answer(f"🆔 Твой Telegram ID: <code>{message.from_user.id}</code>", parse_mode="HTML")
 
