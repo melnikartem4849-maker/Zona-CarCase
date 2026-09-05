@@ -25,6 +25,7 @@ TOKEN = os.getenv("BOT_TOKEN")
 DB_FILE = "zonacarcase.db"
 CASE_PRICE = 1_200_000
 CASE_COOLDOWN = 3 * 60 * 60  # 3 часа
+CONTAINER_COOLDOWN = 1 * 60 * 60  # 1 час
 
 # Контейнеры: покупаются отдельно от обычного кейса.
 # Внутри каждого контейнера выпадает 1 машина из указанных редкостей.
@@ -497,7 +498,8 @@ def init_db():
                 balance INTEGER NOT NULL DEFAULT 5000000,
                 cases_opened INTEGER NOT NULL DEFAULT 0,
                 xp INTEGER NOT NULL DEFAULT 0,
-                last_case_opened REAL NOT NULL DEFAULT 0
+                last_case_opened REAL NOT NULL DEFAULT 0,
+                last_container_opened REAL NOT NULL DEFAULT 0
             )
         """)
         conn.execute("""
@@ -521,6 +523,8 @@ def init_db():
         columns = [row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()]
         if "last_case_opened" not in columns:
             conn.execute("ALTER TABLE users ADD COLUMN last_case_opened REAL NOT NULL DEFAULT 0")
+        if "last_container_opened" not in columns:
+            conn.execute("ALTER TABLE users ADD COLUMN last_container_opened REAL NOT NULL DEFAULT 0")
 
 
 def ensure_user(user_id):
@@ -1060,10 +1064,32 @@ async def container_open(callback: CallbackQuery):
     if not c:
         await callback.answer("Контейнер не найден.", show_alert=True)
         return
+    user = get_user(callback.from_user.id)
+    now = time.time()
+    last_container = user["last_container_opened"] or 0
+    remaining = CONTAINER_COOLDOWN - (now - last_container)
+
+    if remaining > 0:
+        minutes = int(remaining // 60)
+        seconds = int(remaining % 60)
+        hours = minutes // 60
+        minutes %= 60
+        await callback.answer(
+            f"⏳ Контейнеры на КД. Осталось: {hours:02d}:{minutes:02d}:{seconds:02d}",
+            show_alert=True
+        )
+        return
+
     if get_container_amount(callback.from_user.id, container_id) <= 0:
         await callback.answer("У тебя нет такого контейнера.", show_alert=True)
         return
+
     remove_container(callback.from_user.id, container_id, 1)
+    with db() as conn:
+        conn.execute(
+            "UPDATE users SET last_container_opened=? WHERE user_id=?",
+            (now, callback.from_user.id)
+        )
     car = choose_container_car(container_id)
     add_car(callback.from_user.id, car["id"])
     add_xp(callback.from_user.id, 150)
@@ -1312,62 +1338,18 @@ async def quests(message: Message):
     )
 
 
-def get_season_top(limit=10):
-    with db() as conn:
-        return conn.execute(
-            "SELECT user_id, balance, xp, cases_opened FROM users "
-            "ORDER BY balance DESC, xp DESC, cases_opened DESC LIMIT ?",
-            (limit,)
-        ).fetchall()
-
-
 @dp.message(lambda m: m.text == "🏆 Сезон")
 async def season(message: Message):
     user = get_user(message.from_user.id)
     level = user["xp"] // 1000 + 1
     current = user["xp"] % 1000
-
-    lines = [
-        "🏆 <b>СЕЗОННЫЙ ЛИДЕР БОРД</b>",
-        "━━━━━━━━━━━━━━━━━━",
-        "💰 <i>Топ игроков по балансу</i>",
-        ""
-    ]
-
-    top = get_season_top(10)
-    medals = ["🥇", "🥈", "🥉"]
-
-    for index, row in enumerate(top, start=1):
-        try:
-            chat = await message.bot.get_chat(row["user_id"])
-            if chat.username:
-                name = f"@{escape(chat.username)}"
-            elif chat.first_name:
-                name = escape(chat.first_name)
-            else:
-                name = f"Игрок {row['user_id']}"
-        except Exception:
-            name = f"Игрок {row['user_id']}"
-
-        prefix = medals[index - 1] if index <= 3 else f"<b>{index}.</b>"
-        lines.append(
-            f"{prefix} {name}: <b>{money(row['balance'])}</b>"
-        )
-
-    if not top:
-        lines.append("Пока никто не попал в рейтинг.")
-
-    lines.extend([
-        "",
-        "━━━━━━━━━━━━━━━━━━",
-        f"⭐ Твой уровень: <b>{level}</b>",
-        f"✨ Твой опыт: <b>{current}/1000 XP</b>",
-        f"🎁 Кейсов открыто: <b>{user['cases_opened']}</b>",
-        "",
-        "🔥 Играй, открывай кейсы и поднимайся в топ!"
-    ])
-
-    await message.answer("\n".join(lines), parse_mode="HTML")
+    await message.answer(
+        "🏆 <b>СЕЗОН</b>\n\n"
+        f"⭐ Уровень: <b>{level}</b>\n"
+        f"✨ Опыт: <b>{current}/1000</b>\n\n"
+        "🎁 За каждый открытый кейс: +100 XP",
+        parse_mode="HTML"
+    )
 
 
 @dp.message(lambda m: m.text == "🎁 Промокод")
