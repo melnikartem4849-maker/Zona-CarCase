@@ -5,15 +5,15 @@ import random
 import sqlite3
 import time
 import threading
-import aiohttp
-from io import BytesIO
-from aiogram.types import BufferedInputFile
+import json
+import urllib.parse
+import urllib.request
 from html import escape
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from aiogram import Bot, Dispatcher
 from aiogram.filters import CommandStart
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, FSInputFile
 from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 
 
@@ -29,6 +29,8 @@ dp = Dispatcher()
 TOKEN = os.getenv("BOT_TOKEN")
 
 DB_FILE = "zonacarcase.db"
+CAR_IMAGES_DIR = "car_images"
+COLLECTION_IMAGE = os.path.join(CAR_IMAGES_DIR, "collection.jpg")
 CASE_PRICE = 1_200_000
 CASE_COOLDOWN = 3 * 60 * 60  # 3 часа
 AUCTION_INTERVAL = 60 * 60  # новый лот каждый час
@@ -491,88 +493,15 @@ CARS_BY_ID = {car["id"]: car for car in CARS}
 CARS_BY_RARITY = {rarity: [c for c in CARS if c["rarity"] == rarity] for rarity in RARITY_ORDER}
 
 
-
-
-# =========================================================
-# ФОТО МАШИН ИЗ ИНТЕРНЕТА
-# =========================================================
-IMAGE_DIR = "car_images"
-os.makedirs(IMAGE_DIR, exist_ok=True)
-
-def car_make_model(car):
-    name = car["name"]
-    # Названия в старой базе начинаются с марки.
-    known = sorted(BRAND_MODELS.keys(), key=len, reverse=True)
-    for brand in known:
-        if name.startswith(brand + " "):
-            return brand, name[len(brand) + 1:]
-    parts = name.split(" ", 1)
-    return parts[0], parts[1] if len(parts) > 1 else parts[0]
-
-async def fetch_car_photo(car):
-    """Берёт реальное фото модели через Wikimedia Commons и кэширует его."""
-    safe = "".join(ch if ch.isalnum() else "_" for ch in car["name"].lower())
-    path = os.path.join(IMAGE_DIR, f"{car['id']}_{safe}.jpg")
-    if os.path.exists(path) and os.path.getsize(path) > 5000:
-        return path
-
-    make, model = car_make_model(car)
-    url = "https://carapi.trustcar.info/getImage"
-    params = {"make": make, "model": model, "year": str(car["year"])}
-    headers = {"User-Agent": "Zona_CarCase/2.0 (Telegram bot; contact via Telegram)"}
-
-    try:
-        timeout = aiohttp.ClientTimeout(total=20)
-        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-            async with session.get(url, params=params, allow_redirects=True) as resp:
-                content_type = resp.headers.get("Content-Type", "")
-                if resp.status != 200 or not content_type.startswith("image/"):
-                    return None
-                data = await resp.read()
-                if len(data) < 5000:
-                    return None
-                with open(path, "wb") as f:
-                    f.write(data)
-                return path
-    except Exception:
-        logging.exception("Не удалось получить фото %s", car["name"])
-        return None
-
-def car_card_text(car, prefix="🚗 МАШИНА"):
-    r = RARITIES[car["rarity"]]
-    return (
-        f"<b>{prefix}</b>\n\n"
-        f"{r['emoji']} <b>{escape(car['name'])}</b>\n"
-        f"💎 Редкость: <b>{escape(car['rarity'])}</b>\n"
-        f"📅 Год: <b>{car['year']}</b>\n"
-        f"⚡ Мощность: <b>{car['power']} л.с.</b>\n"
-        f"💰 Цена: <b>{money(car['price'])}</b>"
-    )
-
-async def send_car_photo(bot, chat_id, car, prefix="🚗 МАШИНА", reply_markup=None):
-    path = await fetch_car_photo(car)
-    text = car_card_text(car, prefix)
-    if path:
-        with open(path, "rb") as f:
-            data = f.read()
-        await bot.send_photo(
-            chat_id,
-            BufferedInputFile(data, filename=os.path.basename(path)),
-            caption=text,
-            reply_markup=reply_markup,
-            parse_mode="HTML",
-        )
-        return True
-    await bot.send_message(chat_id, text + "\n\n🖼 Фото временно недоступно.", reply_markup=reply_markup, parse_mode="HTML")
-    return False
-
-
 # =========================================================
 # БАЗА ДАННЫХ
 # =========================================================
 def db():
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, timeout=15)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=15000")
+    conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
 
@@ -584,7 +513,12 @@ def init_db():
                 balance INTEGER NOT NULL DEFAULT 5000000,
                 cases_opened INTEGER NOT NULL DEFAULT 0,
                 xp INTEGER NOT NULL DEFAULT 0,
-                last_case_opened REAL NOT NULL DEFAULT 0
+                last_case_opened REAL NOT NULL DEFAULT 0,
+                username TEXT NOT NULL DEFAULT '',
+                first_name TEXT NOT NULL DEFAULT '',
+                last_daily REAL NOT NULL DEFAULT 0,
+                referrals INTEGER NOT NULL DEFAULT 0,
+                referral_earnings INTEGER NOT NULL DEFAULT 0
             )
         """)
         conn.execute("""
@@ -623,6 +557,17 @@ def init_db():
         columns = [row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()]
         if "last_case_opened" not in columns:
             conn.execute("ALTER TABLE users ADD COLUMN last_case_opened REAL NOT NULL DEFAULT 0")
+
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()]
+        for column, definition in [
+            ("username", "TEXT NOT NULL DEFAULT ''"),
+            ("first_name", "TEXT NOT NULL DEFAULT ''"),
+            ("last_daily", "REAL NOT NULL DEFAULT 0"),
+            ("referrals", "INTEGER NOT NULL DEFAULT 0"),
+            ("referral_earnings", "INTEGER NOT NULL DEFAULT 0"),
+        ]:
+            if column not in columns:
+                conn.execute(f"ALTER TABLE users ADD COLUMN {column} {definition}")
 
 
 def ensure_user(user_id):
@@ -868,15 +813,17 @@ async def auction_loop(bot):
             if result:
                 winner_id, car, bid = result
                 try:
-                    await bot.send_message(
-                        winner_id,
+                    path = make_car_image(car)
+                    caption = (
                         "🏆 <b>ТЫ ПОБЕДИЛ В АУКЦИОНЕ!</b>\n\n"
-                        f"🔴 {escape(car['name'])}\n"
+                        + car_caption(car, 1) + "\n"
                         f"💰 Ставка: <b>{money(bid)}</b>\n"
-                        "🚘 Машина добавлена в гараж!",
-                        parse_mode="HTML"
+                        "🚘 Машина добавлена в гараж!"
                     )
-                    await send_car_photo(bot, winner_id, car, "🏆 АУКЦИОН — ТВОЯ МАШИНА")
+                    if path:
+                        await bot.send_photo(winner_id, FSInputFile(path), caption=caption, parse_mode="HTML")
+                    else:
+                        await bot.send_message(winner_id, caption, parse_mode="HTML")
                 except Exception:
                     pass
             auction = get_auction()
@@ -957,15 +904,17 @@ def main_keyboard():
     for text in [
         "🚘 Открыть авто",
         "🏠 Гараж",
+        "📖 Коллекция",
         "📦 Контейнеры",
         "👤 Профиль",
         "📝 Квесты",
         "🏆 Сезон",
         "🎁 Промокод",
+        "🎁 Ежедневный бонус",
         "👥 Реферальная ссылка",
     ]:
         kb.button(text=text)
-    kb.adjust(2, 2, 2, 1)
+    kb.adjust(2, 2, 2, 2, 1)
     return kb.as_markup(resize_keyboard=True)
 
 
@@ -1109,12 +1058,252 @@ def garage_summary(user_id):
 
 
 # =========================================================
+# ИЗОБРАЖЕНИЯ МАШИН
+# =========================================================
+def _safe_image_name(name):
+    return "".join(ch.lower() if ch.isalnum() else "_" for ch in name).strip("_")
+
+
+def _car_image_candidates(car):
+    cid = car["id"]
+    safe = _safe_image_name(car["name"])
+    base = os.path.join(CAR_IMAGES_DIR)
+    candidates = []
+    for ext in ("jpg", "jpeg", "png", "webp"):
+        candidates.append(os.path.join(base, f"{cid}.{ext}"))
+        candidates.append(os.path.join(base, f"{safe}.{ext}"))
+    return candidates
+
+
+def make_car_image(car):
+    """Получить настоящее фото конкретной модели из Wikimedia Commons.
+
+    Сначала проверяем локальный кэш. Если фото нет, ищем модель через API
+    Wikimedia Commons, скачиваем thumbnail и сохраняем его в car_images/.
+    Если интернет временно недоступен, возвращаем локальную карточку-заглушку.
+    """
+    os.makedirs(CAR_IMAGES_DIR, exist_ok=True)
+
+    for path in _car_image_candidates(car):
+        if os.path.isfile(path) and os.path.getsize(path) > 1000:
+            return path
+
+    safe = _safe_image_name(car["name"])
+    out = os.path.join(CAR_IMAGES_DIR, f"{car['id']}.jpg")
+    source_file = os.path.join(CAR_IMAGES_DIR, f"{car['id']}.source.txt")
+
+    # Ищем именно страницу файла в Wikimedia Commons.
+    queries = [
+        f"{car['name']} {car['year']}",
+        car["name"],
+        car["name"].replace("_", " "),
+    ]
+    try:
+        for search in queries:
+            params = {
+                "action": "query",
+                "generator": "search",
+                "gsrsearch": search,
+                "gsrnamespace": 6,
+                "gsrlimit": 8,
+                "prop": "imageinfo",
+                "iiprop": "url|mime",
+                "iiurlwidth": 1200,
+                "format": "json",
+                "origin": "*",
+            }
+            url = "https://commons.wikimedia.org/w/api.php?" + urllib.parse.urlencode(params)
+            req = urllib.request.Request(url, headers={"User-Agent": "ZonaCarCase/2.0 (Telegram bot)"})
+            with urllib.request.urlopen(req, timeout=12) as response:
+                data = json.loads(response.read().decode("utf-8"))
+
+            pages = list((data.get("query", {}).get("pages", {}) or {}).values())
+            for page in pages:
+                info = (page.get("imageinfo") or [{}])[0]
+                image_url = info.get("thumburl") or info.get("url")
+                mime = (info.get("mime") or "").lower()
+                if not image_url or mime not in ("image/jpeg", "image/png", "image/webp"):
+                    continue
+                try:
+                    img_req = urllib.request.Request(
+                        image_url,
+                        headers={"User-Agent": "ZonaCarCase/2.0 (Telegram bot)"}
+                    )
+                    with urllib.request.urlopen(img_req, timeout=20) as img_response:
+                        raw = img_response.read()
+                    if len(raw) < 5000:
+                        continue
+                    # Приводим PNG/WebP/JPEG к обычному JPEG, который Telegram принимает.
+                    from PIL import Image
+                    import io
+                    image = Image.open(io.BytesIO(raw)).convert("RGB")
+                    tmp = out + ".tmp"
+                    image.save(tmp, "JPEG", quality=90, optimize=True)
+                    os.replace(tmp, out)
+                    with open(source_file, "w", encoding="utf-8") as f:
+                        f.write(image_url)
+                    return out
+                except Exception:
+                    continue
+    except Exception:
+        logging.exception("Не удалось скачать фото для %s", car["name"])
+
+    # Надёжная заглушка, если Wikimedia временно недоступна.
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+        img = Image.new("RGB", (1280, 720), (14, 18, 24))
+        d = ImageDraw.Draw(img)
+        bold_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+        regular_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+        title_font = ImageFont.truetype(bold_path, 52)
+        text_font = ImageFont.truetype(regular_path, 30)
+        d.rounded_rectangle((45, 45, 1235, 675), radius=30, outline=(100, 110, 125), width=3)
+        d.text((80, 90), car["name"], font=title_font, fill=(245, 245, 245))
+        d.text((82, 175), f"{car['year']}  •  {car['power']} л.с.", font=text_font, fill=(190, 200, 215))
+        d.text((82, 225), f"Стоимость: {money(car['price'])}", font=text_font, fill=(220, 225, 235))
+        d.text((82, 600), "Фото временно недоступно — попробуйте открыть машину ещё раз.", font=text_font, fill=(150, 160, 175))
+        img.save(out, "JPEG", quality=90)
+        return out
+    except Exception:
+        return None
+
+def make_collection_cover():
+    os.makedirs(CAR_IMAGES_DIR, exist_ok=True)
+    if os.path.isfile(COLLECTION_IMAGE):
+        return COLLECTION_IMAGE
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        return None
+    W, H = 1280, 720
+    img = Image.new("RGB", (W, H), (11, 16, 23))
+    d = ImageDraw.Draw(img)
+    for i in range(6):
+        x = 70 + i * 205
+        d.rounded_rectangle((x, 240-(i%2)*25, x+180, 520), radius=25, fill=(30+i*4, 37+i*4, 48+i*5), outline=(90, 100, 115), width=2)
+    title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 64)
+    sub = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 34)
+    d.text((70, 70), "📖 КОЛЛЕКЦИЯ", font=title, fill=(245,245,245))
+    d.text((75, 155), "306 автомобилей • собирай редкие модели", font=sub, fill=(185,195,210))
+    img.save(COLLECTION_IMAGE, "JPEG", quality=92)
+    return COLLECTION_IMAGE
+
+
+def car_caption(car, amount=1, prefix="🚘"):
+    r = RARITIES[car["rarity"]]
+    return (
+        f"{prefix} <b>{escape(car['name'])}</b>\n\n"
+        f"{r['emoji']} Редкость: <b>{escape(car['rarity'])}</b>\n"
+        f"📅 Год: <b>{car['year']}</b>\n"
+        f"⚡ Мощность: <b>{car['power']} л.с.</b>\n"
+        f"💎 Стоимость: <b>{money(car['price'])}</b>\n"
+        f"📦 В гараже: <b>{amount} шт.</b>"
+    )
+
+
+def make_season_image():
+    os.makedirs(CAR_IMAGES_DIR, exist_ok=True)
+    path = os.path.join(CAR_IMAGES_DIR, "season1.jpg")
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        return None
+
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT user_id, username, first_name, xp, cases_opened FROM users ORDER BY xp DESC, cases_opened DESC LIMIT 10"
+        ).fetchall()
+
+    W, H = 1400, 1100
+    img = Image.new("RGB", (W, H), (12, 16, 23))
+    d = ImageDraw.Draw(img)
+    bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 44)
+    title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 72)
+    small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 30)
+    white=(245,245,245); muted=(175,185,200)
+
+    d.text((70, 45), "🏆 СЕЗОН 1", font=title, fill=white)
+    d.text((74, 130), "Лидерборд сезона • топ игроков по XP", font=small, fill=muted)
+
+    # podium
+    d.rounded_rectangle((430, 190, 970, 360), radius=30, fill=(37, 42, 52), outline=(105, 115, 130), width=3)
+    d.text((700, 235), "🥇 1", font=bold, fill=white, anchor="mm")
+    d.text((525, 285), "🥈 2", font=bold, fill=white, anchor="mm")
+    d.text((875, 285), "🥉 3", font=bold, fill=white, anchor="mm")
+
+    y=405
+    for i,row in enumerate(rows,1):
+        name = ("@" + row["username"]) if row["username"] else (row["first_name"] or f"Игрок {row['user_id']}")
+        if len(name)>24: name=name[:23]+"…"
+        bg=(28,34,43) if i%2 else (23,29,37)
+        d.rounded_rectangle((60,y,W-60,y+58), radius=15, fill=bg)
+        medal = {1:"🥇",2:"🥈",3:"🥉"}.get(i,f"{i}.")
+        d.text((82,y+29), medal, font=small, fill=white, anchor="lm")
+        d.text((160,y+29), name, font=bold if i<=3 else small, fill=white, anchor="lm")
+        d.text((860,y+29), f"⭐ {row['xp']:,} XP".replace(","," "), font=small, fill=white, anchor="lm")
+        d.text((1110,y+29), f"🎁 {row['cases_opened']}", font=small, fill=muted, anchor="lm")
+        y += 65
+    d.text((70, 1060), "Призы выдаются автоматически в конце сезона.", font=small, fill=muted)
+    img.save(path,"JPEG",quality=92)
+    return path
+
+
+async def send_car_result(target, car, title="🎉 <b>МАШИНА ВЫПАЛА!</b>", amount=1, reply_markup=None):
+    path = make_car_image(car)
+    caption = title + "\n\n" + car_caption(car, amount)
+    if path:
+        await target.answer_photo(FSInputFile(path), caption=caption, reply_markup=reply_markup, parse_mode="HTML")
+    else:
+        await target.answer(caption, reply_markup=reply_markup, parse_mode="HTML")
+
+
+# =========================================================
 # HANDLERS
 # =========================================================
 
+def register_user(message: Message):
+    ensure_user(message.from_user.id)
+    with db() as conn:
+        conn.execute(
+            "UPDATE users SET username=?, first_name=? WHERE user_id=?",
+            (message.from_user.username or "", message.from_user.first_name or "", message.from_user.id)
+        )
+
+
+def today_start():
+    now = time.time()
+    return now - (now % 86400)
+
+
+def claim_daily(user_id):
+    ensure_user(user_id)
+    now = time.time()
+    with db() as conn:
+        row = conn.execute("SELECT last_daily FROM users WHERE user_id=?", (user_id,)).fetchone()
+        if row and row["last_daily"] >= today_start():
+            return False
+        conn.execute(
+            "UPDATE users SET balance=balance+500000, xp=xp+50, last_daily=? WHERE user_id=?",
+            (now, user_id)
+        )
+    return True
+
+
 @dp.message(CommandStart())
 async def start(message: Message):
-    ensure_user(message.from_user.id)
+    register_user(message)
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) == 2 and parts[1].isdigit() and int(parts[1]) != message.from_user.id:
+        referrer_id = int(parts[1])
+        ensure_user(referrer_id)
+        with db() as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS referrals (referrer_id INTEGER, invited_id INTEGER UNIQUE, created_at REAL)")
+            try:
+                conn.execute("INSERT INTO referrals(referrer_id, invited_id, created_at) VALUES (?, ?, ?)", (referrer_id, message.from_user.id, time.time()))
+                conn.execute("UPDATE users SET referrals=referrals+1, referral_earnings=referral_earnings+500000, balance=balance+500000, xp=xp+100 WHERE user_id=?", (referrer_id,))
+                conn.execute("UPDATE users SET balance=balance+500000, xp=xp+100 WHERE user_id=?", (message.from_user.id,))
+            except sqlite3.IntegrityError:
+                pass
     user = get_user(message.from_user.id)
     await message.answer(
         "🚘 <b>Добро пожаловать в Zona CarCase!</b>\n\n"
@@ -1131,6 +1320,7 @@ async def start(message: Message):
 
 @dp.message(lambda m: m.text == "👤 Профиль")
 async def profile(message: Message):
+    register_user(message)
     user = get_user(message.from_user.id)
     unique, total = garage_summary(message.from_user.id)
     level = user["xp"] // 1000 + 1
@@ -1230,14 +1420,23 @@ async def open_case(callback: CallbackQuery):
         if row and row["amount"] > 1:
             duplicate_text = f"\n📦 Теперь этой машины у тебя: <b>{row['amount']} шт.</b>"
 
-    await send_car_photo(
-        callback.bot,
-        callback.message.chat.id,
-        car,
-        "🎉 КЕЙС ОТКРЫТ — ВЫПАЛА МАШИНА!",
+    with db() as conn:
+        row = conn.execute(
+            "SELECT amount FROM garage WHERE user_id=? AND car_id=?",
+            (user_id, car["id"])
+        ).fetchone()
+    amount = row["amount"] if row else 1
+    caption_title = (
+        "🎉 <b>КЕЙС ОТКРЫТ!</b>\n\n"
+        f"🎯 Шанс редкости: <b>{r['chance']}%</b>"
+        f"{duplicate_text}"
     )
-    if duplicate_text:
-        await callback.message.answer(duplicate_text.strip(), parse_mode="HTML")
+    path = make_car_image(car)
+    caption = caption_title + "\n\n" + car_caption(car, amount)
+    if path:
+        await callback.message.answer_photo(FSInputFile(path), caption=caption, reply_markup=case_keyboard(), parse_mode="HTML")
+    else:
+        await callback.message.answer(caption, reply_markup=case_keyboard(), parse_mode="HTML")
     await callback.answer("🚘 Машина добавлена в гараж!")
 
 
@@ -1393,14 +1592,12 @@ async def container_open(callback: CallbackQuery):
     add_car(callback.from_user.id, car["id"])
     add_xp(callback.from_user.id, 150)
     r = RARITIES[car["rarity"]]
-    await callback.message.delete()
-    await send_car_photo(
-        callback.bot,
-        callback.message.chat.id,
-        car,
-        f"🎉 {c['emoji']} КОНТЕЙНЕР ОТКРЫТ — ВЫПАЛА МАШИНА!",
-        reply_markup=containers_keyboard(callback.from_user.id),
-    )
+    path = make_car_image(car)
+    caption = "🎉 <b>КОНТЕЙНЕР ОТКРЫТ!</b>\n\n" + car_caption(car) + "\n\n🏠 Машина добавлена в гараж."
+    if path:
+        await callback.message.answer_photo(FSInputFile(path), caption=caption, reply_markup=containers_keyboard(callback.from_user.id), parse_mode="HTML")
+    else:
+        await callback.message.answer(caption, reply_markup=containers_keyboard(callback.from_user.id), parse_mode="HTML")
     await callback.answer("🚘 Машина добавлена в гараж!")
 
 
@@ -1418,15 +1615,38 @@ async def exclusive_car_info(callback: CallbackQuery):
         ).fetchone()
     amount = row["amount"] if row else 0
     r = RARITIES[car["rarity"]]
-    await callback.message.delete()
-    await send_car_photo(
-        callback.bot,
-        callback.message.chat.id,
-        car,
-        "🔴 ЭКСКЛЮЗИВНАЯ МАШИНА",
+    await callback.message.edit_text(
+        f'{r["emoji"]} <b>{escape(car["name"])}</b>\n\n'
+        f'⭐ Редкость: <b>{escape(car["rarity"])}</b>\n'
+        f'📅 Год: <b>{car["year"]}</b>\n'
+        f'⚡ Мощность: <b>{car["power"]} л.с.</b>\n'
+        f'💎 Стоимость: <b>{money(car["price"])}</b>\n'
+        f'📦 В гараже: <b>{amount} шт.</b>',
         reply_markup=exclusive_keyboard(),
+        parse_mode="HTML"
     )
     await callback.answer()
+
+
+@dp.message(lambda m: m.text == "📖 Коллекция")
+async def collection(message: Message):
+    register_user(message)
+    unique, total = garage_summary(message.from_user.id)
+    path = make_collection_cover()
+    caption = (
+        "📖 <b>МОЯ КОЛЛЕКЦИЯ</b>\n\n"
+        f"🚘 Собрано: <b>{unique}/306</b>\n"
+        f"📦 Всего экземпляров: <b>{total}</b>\n\n"
+        "Нажми «Открыть коллекцию», чтобы смотреть машины с фотографиями."
+    )
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🚘 Открыть коллекцию", callback_data="garage:all")
+    kb.button(text="🏠 Гараж", callback_data="garage:all")
+    kb.adjust(1)
+    if path:
+        await message.answer_photo(FSInputFile(path), caption=caption, reply_markup=kb.as_markup(), parse_mode="HTML")
+    else:
+        await message.answer(caption, reply_markup=kb.as_markup(), parse_mode="HTML")
 
 
 @dp.message(lambda m: m.text == "🏠 Гараж")
@@ -1528,14 +1748,16 @@ async def car_info(callback: CallbackQuery):
         return
 
     r = RARITIES[car["rarity"]]
-    await callback.message.delete()
-    await send_car_photo(
-        callback.bot,
-        callback.message.chat.id,
-        car,
-        "📖 МАШИНА В КОЛЛЕКЦИИ",
-        reply_markup=car_keyboard(car_id),
-    )
+    path = make_car_image(car)
+    caption = car_caption(car, row["amount"]) + "\n" + f"💵 Продажа одной: <b>{money(int(car['price'] * r['sell']))}</b>"
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    if path:
+        await callback.message.answer_photo(FSInputFile(path), caption=caption, reply_markup=car_keyboard(car_id), parse_mode="HTML")
+    else:
+        await callback.message.answer(caption, reply_markup=car_keyboard(car_id), parse_mode="HTML")
     await callback.answer()
 
 
@@ -1631,45 +1853,85 @@ async def quests(message: Message):
 
 @dp.message(lambda m: m.text == "🏆 Сезон")
 async def season(message: Message):
+    register_user(message)
     user = get_user(message.from_user.id)
+    path = make_season_image()
     level = user["xp"] // 1000 + 1
-    current = user["xp"] % 1000
-    await message.answer(
-        "🏆 <b>СЕЗОН</b>\n\n"
-        f"⭐ Уровень: <b>{level}</b>\n"
-        f"✨ Опыт: <b>{current}/1000</b>\n\n"
-        "🎁 За каждый открытый кейс: +100 XP",
-        parse_mode="HTML"
+    caption = (
+        "🏆 <b>СЕЗОН 1</b>\n\n"
+        f"⭐ Твой уровень: <b>{level}</b>\n"
+        f"✨ Твой XP: <b>{user['xp']}</b>\n\n"
+        "🎁 За открытие кейса: +100 XP\n"
+        "🏅 Чем больше XP — тем выше место в рейтинге."
     )
+    if path:
+        await message.answer_photo(FSInputFile(path), caption=caption, parse_mode="HTML")
+    else:
+        await message.answer(caption, parse_mode="HTML")
 
 
 @dp.message(lambda m: m.text == "🎁 Промокод")
 async def promo(message: Message):
     await message.answer(
         "🎁 <b>ПРОМОКОД</b>\n\n"
-        "Система промокодов пока подготовлена как раздел.\n"
-        "Если хочешь, сюда можно добавить реальные коды с наградами.",
+        "Чтобы активировать код, отправь сообщение:\n"
+        "<code>/promo КОД</code>",
         parse_mode="HTML"
     )
+
+
+PROMOCODES = {
+    "START": {"balance": 1_000_000, "xp": 100},
+    "ZONA": {"balance": 2_000_000, "xp": 250},
+}
+
+
+@dp.message(lambda m: (m.text or "").startswith("/promo "))
+async def promo_activate(message: Message):
+    code = message.text.split(maxsplit=1)[1].strip().upper()
+    reward = PROMOCODES.get(code)
+    if not reward:
+        await message.answer("❌ Промокод не найден или уже недействителен.")
+        return
+    ensure_user(message.from_user.id)
+    with db() as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS used_promocodes (user_id INTEGER, code TEXT, PRIMARY KEY(user_id, code))")
+        try:
+            conn.execute("INSERT INTO used_promocodes(user_id, code) VALUES (?, ?)", (message.from_user.id, code))
+        except sqlite3.IntegrityError:
+            await message.answer("⚠️ Ты уже использовал этот промокод.")
+            return
+        conn.execute("UPDATE users SET balance=balance+?, xp=xp+? WHERE user_id=?", (reward["balance"], reward["xp"], message.from_user.id))
+    await message.answer(f"✅ Промокод активирован!\n\n💰 +{money(reward['balance'])}\n⭐ +{reward['xp']} XP")
 
 
 @dp.message(lambda m: m.text == "👥 Реферальная ссылка")
 async def referral(message: Message):
     user_id = message.from_user.id
+    user = get_user(user_id)
     await message.answer(
         "👥 <b>РЕФЕРАЛЬНАЯ СИСТЕМА</b>\n\n"
-        f"🔗 Твоя ссылка:\n"
-        f"<code>https://t.me/{(await message.bot.me()).username}?start={user_id}</code>\n\n"
-        "👤 Приглашено: 0\n"
-        "💰 Заработано: 0$",
+        f"🔗 Твоя ссылка:\n<code>https://t.me/ZonaCarCaseBot?start={user_id}</code>\n\n"
+        f"👤 Приглашено: <b>{user['referrals']}</b>\n"
+        f"💰 Заработано: <b>{money(user['referral_earnings'])}</b>\n\n"
+        "🎁 За нового игрока: 500 000$ + 100 XP",
         parse_mode="HTML"
     )
 
 
+@dp.message(lambda m: m.text == "🎁 Ежедневный бонус")
+async def daily_bonus(message: Message):
+    if claim_daily(message.from_user.id):
+        await message.answer("🎁 <b>ЕЖЕДНЕВНЫЙ БОНУС ПОЛУЧЕН!</b>\n\n💰 +500 000$\n⭐ +50 XP", parse_mode="HTML")
+    else:
+        await message.answer("⏳ Ты уже забрал ежедневный бонус. Возвращайся завтра!")
+
+
 @dp.callback_query(lambda c: c.data == "back_menu")
 async def back_menu(callback: CallbackQuery):
-    await callback.message.edit_text(
+    await callback.message.answer(
         "🏠 <b>Главное меню</b>\n\nВыбери действие через кнопки ниже.",
+        reply_markup=main_keyboard(),
         parse_mode="HTML"
     )
     await callback.answer()
