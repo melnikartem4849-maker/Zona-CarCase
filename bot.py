@@ -702,6 +702,7 @@ def start_new_auction():
         return None
     car = random.choice(cars)
     with db() as conn:
+        now = time.time()
         conn.execute("""
             INSERT INTO auction(id, car_id, current_bid, bidder_id, ends_at, created_at, active)
             VALUES (1, ?, 0, NULL, 0, ?, 1)
@@ -710,8 +711,9 @@ def start_new_auction():
                 current_bid=0,
                 bidder_id=NULL,
                 ends_at=0,
+                created_at=?,
                 active=1
-        """, (car["id"],))
+        """, (car["id"], now, now))
     return car
 
 
