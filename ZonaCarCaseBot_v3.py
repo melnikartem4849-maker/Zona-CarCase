@@ -394,13 +394,19 @@ def fmt_time(seconds):
 
 
 def choose_car():
-    rarity = random.choices(RARITY_ORDER, weights=[RARITIES[r]["chance"] for r in RARITY_ORDER], k=1)[0]
+    available = [r for r in RARITY_ORDER if CARS_BY_RARITY.get(r)]
+    if not available:
+        return None
+    rarity = random.choices(available, weights=[RARITIES[r]["chance"] for r in available], k=1)[0]
     return random.choice(CARS_BY_RARITY[rarity])
 
 
 def choose_container_car(container_id):
     c = CONTAINERS[container_id]
-    rarity = random.choice(c["rarities"])
+    available = [r for r in c["rarities"] if CARS_BY_RARITY.get(r)]
+    if not available:
+        return None
+    rarity = random.choice(available)
     return random.choice(CARS_BY_RARITY[rarity])
 
 # =========================================================
@@ -421,6 +427,8 @@ def refund_auction_bid(conn, auction):
 
 
 def start_new_auction():
+    if not CARS_BY_RARITY.get("Exclusive"):
+        return None
     car = random.choice(CARS_BY_RARITY["Exclusive"])
     with db() as conn:
         old = conn.execute("SELECT * FROM auction WHERE id=1").fetchone()
@@ -1312,7 +1320,7 @@ async def main():
     bot = Bot(token=TOKEN)
     await bot.delete_webhook(drop_pending_updates=True)
     threading.Thread(target=run_web_server, daemon=True).start()
-    if not get_auction():
+    if not get_auction() and CARS_BY_RARITY.get("Exclusive"):
         start_new_auction()
     asyncio.create_task(auction_loop(bot))
     await dp.start_polling(bot)
