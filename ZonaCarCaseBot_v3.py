@@ -5,6 +5,8 @@ import random
 import sqlite3
 import time
 import threading
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from html import escape
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -50,6 +52,8 @@ AUCTION_BID_TIME = 60  # 1 минута после каждой ставки
 AUCTION_MIN_BID = 1_000_000
 AUCTION_BID_STEP = 500_000
 ADMIN_ID = 5474546385
+KYIV_TZ = ZoneInfo('Europe/Kyiv')
+MONTHLY_TOP_LIMIT = 10
 
 # Контейнеры: покупаются отдельно от обычного кейса.
 # Внутри каждого контейнера выпадает 1 машина из указанных редкостей.
@@ -183,6 +187,21 @@ def init_db():
                 PRIMARY KEY (user_id, code)
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS monthly_stats (
+                user_id INTEGER NOT NULL,
+                month TEXT NOT NULL,
+                xp INTEGER NOT NULL DEFAULT 0,
+                cases_opened INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (user_id, month)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS monthly_reports (
+                month TEXT PRIMARY KEY,
+                sent_at REAL NOT NULL DEFAULT 0
+            )
+        """)
 
         # Safe migrations for databases created by the previous version.
         columns = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
@@ -303,10 +322,34 @@ def add_balance(user_id, amount):
         conn.execute("UPDATE users SET balance=balance+? WHERE user_id=?", (int(amount), user_id))
 
 
+def current_month():
+    return datetime.now(KYIV_TZ).strftime("%Y-%m")
+
+
+def add_monthly_xp(conn, user_id, amount):
+    month = current_month()
+    conn.execute("""
+        INSERT INTO monthly_stats(user_id, month, xp)
+        VALUES (?, ?, ?)
+        ON CONFLICT(user_id, month) DO UPDATE SET xp=xp+excluded.xp
+    """, (user_id, month, int(amount)))
+
+
+def add_monthly_case(conn, user_id):
+    month = current_month()
+    conn.execute("""
+        INSERT INTO monthly_stats(user_id, month, cases_opened)
+        VALUES (?, ?, 1)
+        ON CONFLICT(user_id, month) DO UPDATE SET cases_opened=cases_opened+1
+    """, (user_id, month))
+
+
 def add_xp(user_id, amount):
     ensure_user(user_id)
+    amount = int(amount)
     with db() as conn:
-        conn.execute("UPDATE users SET xp=xp+? WHERE user_id=?", (int(amount), user_id))
+        conn.execute("UPDATE users SET xp=xp+? WHERE user_id=?", (amount, user_id))
+        add_monthly_xp(conn, user_id, amount)
 
 
 def add_car(user_id, car_id, amount=1):
@@ -628,6 +671,7 @@ def car_keyboard(car_id):
 def admin_keyboard():
     kb = InlineKeyboardBuilder()
     kb.button(text="📊 Статистика", callback_data="admin:stats")
+    kb.button(text="🏆 Топ за месяц", callback_data="admin:monthly_top")
     kb.button(text="🚘 Выдать машину", callback_data="admin:give_car")
     kb.button(text="➕ Добавить машину", callback_data="admin:add_car")
     kb.button(text="📋 Мои добавленные машины", callback_data="admin:custom_cars")
@@ -757,6 +801,8 @@ async def open_case(callback: CallbackQuery):
         return
     with db() as conn:
         conn.execute("UPDATE users SET balance=balance-?, cases_opened=cases_opened+1, last_case_opened=?, xp=xp+100 WHERE user_id=?", (CASE_PRICE, now, user_id))
+        add_monthly_xp(conn, user_id, 100)
+        add_monthly_case(conn, user_id)
         conn.execute("""
             INSERT INTO garage(user_id, car_id, amount) VALUES (?, ?, 1)
             ON CONFLICT(user_id, car_id) DO UPDATE SET amount=amount+1
@@ -994,6 +1040,7 @@ async def daily_bonus(message: Message):
         streak = user["daily_streak"] + 1 if now-last <= 172800 else 1
         reward = min(2_000_000, 500_000 + (streak-1)*100_000)
         conn.execute("UPDATE users SET daily_last=?, daily_streak=?, balance=balance+?, xp=xp+50 WHERE user_id=?", (now, streak, reward, user_id))
+        add_monthly_xp(conn, user_id, 50)
     await message.answer(f"🎁 <b>БОНУС ПОЛУЧЕН!</b>\n\n💰 Награда: <b>{money(reward)}</b>\n🔥 Серия: <b>{streak}</b> дней\n⭐ +50 XP", parse_mode="HTML")
 
 
@@ -1085,6 +1132,69 @@ async def referral(message: Message):
     )
 
 
+async def send_monthly_report(bot, month=None):
+    if month is None:
+        now = datetime.now(KYIV_TZ)
+        year, mon = now.year, now.month
+        if mon == 1:
+            year, mon = year - 1, 12
+        else:
+            mon -= 1
+        month = f"{year:04d}-{mon:02d}"
+
+    with db() as conn:
+        already = conn.execute("SELECT 1 FROM monthly_reports WHERE month=?", (month,)).fetchone()
+        if already:
+            return False
+        rows = conn.execute("""
+            SELECT ms.user_id, ms.xp, ms.cases_opened, u.username, u.first_name
+            FROM monthly_stats ms
+            JOIN users u ON u.user_id = ms.user_id
+            WHERE ms.month=? AND (ms.xp > 0 OR ms.cases_opened > 0)
+            ORDER BY ms.xp DESC, ms.cases_opened DESC, ms.user_id ASC
+            LIMIT ?
+        """, (month, MONTHLY_TOP_LIMIT)).fetchall()
+        conn.execute("INSERT INTO monthly_reports(month, sent_at) VALUES (?, ?)", (month, time.time()))
+
+    if not rows:
+        text = f"🏆 <b>ИТОГИ ЗА {month}</b>\n\nЗа месяц активных игроков не было."
+    else:
+        text = f"🏆 <b>ТОП ИГРОКОВ ЗА {month}</b>\n\n"
+        for i, row in enumerate(rows, 1):
+            name = "@" + row["username"] if row["username"] else (row["first_name"] or f"ID {row['user_id']}")
+            text += (
+                f"{i}. <b>{escape(name)}</b> — ⭐ {row['xp']} XP"
+                f" • 🎁 {row['cases_opened']} кейсов"
+                f" • 🆔 <code>{row['user_id']}</code>\n"
+            )
+        text += (
+            "\n🎁 <b>ПРИЗЫ ЗА ТОП-3</b>\n"
+            "🥇 1 место — 🟡 <b>BMW M5 Competition</b> (Legendary)\n"
+            "🥈 2 место — 🟣 <b>Porsche 911 Turbo S</b> (Epic)\n"
+            "🥉 3 место — 🔵 <b>Nissan GT-R R35</b> (Rare)\n"
+            "\n📌 Выдай эти машины победителям через /admin → 🚘 Выдать машину."
+        )
+    try:
+        await bot.send_message(ADMIN_ID, text, parse_mode="HTML")
+        return True
+    except Exception:
+        with db() as conn:
+            conn.execute("DELETE FROM monthly_reports WHERE month=?", (month,))
+        logging.exception("Не удалось отправить ежемесячный топ")
+        return False
+
+
+async def monthly_report_loop(bot):
+    while True:
+        try:
+            now = datetime.now(KYIV_TZ)
+            if now.day == 1 and now.hour == 0 and now.minute < 5:
+                await send_monthly_report(bot)
+        except Exception:
+            logging.exception("Ошибка ежемесячного отчёта")
+        await asyncio.sleep(60)
+
+
 @dp.message(lambda m: m.text == "🏆 Лидеры")
 async def leaders(message: Message):
     with db() as conn:
@@ -1133,7 +1243,13 @@ async def admin_actions(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
         await callback.answer("⛔ Нет доступа", show_alert=True); return
     action = callback.data.split(":",1)[1]
-    if action == "stats":
+    if action == "monthly_top":
+        sent = await send_monthly_report(callback.bot)
+        await callback.message.answer(
+            "✅ Топ за предыдущий месяц отправлен тебе." if sent
+            else "ℹ️ Отчёт уже был отправлен или за прошлый месяц нет данных."
+        )
+    elif action == "stats":
         with db() as conn:
             users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
             cars = conn.execute("SELECT COALESCE(SUM(amount),0) FROM garage").fetchone()[0]
@@ -1342,6 +1458,10 @@ async def main():
     if not get_auction() and CARS_BY_RARITY.get("Exclusive"):
         start_new_auction()
     asyncio.create_task(auction_loop(bot))
+    asyncio.create_task(monthly_report_loop(bot))
+    now = datetime.now(KYIV_TZ)
+    if now.day == 1:
+        await send_monthly_report(bot)
     await dp.start_polling(bot)
 
 
