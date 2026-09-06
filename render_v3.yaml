@@ -1,0 +1,9 @@
+services:
+  - type: worker
+    name: zona-carcase-bot
+    runtime: python
+    buildCommand: pip install -r requirements_v3.txt
+    startCommand: python ZonaCarCaseBot_v3.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
