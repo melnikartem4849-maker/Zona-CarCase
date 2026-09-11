@@ -5,8 +5,6 @@ import random
 import sqlite3
 import time
 import threading
-from datetime import datetime
-from zoneinfo import ZoneInfo
 from html import escape
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -35,6 +33,10 @@ class GiveCarState(StatesGroup):
     car = State()
 
 
+class ClanCreateState(StatesGroup):
+    name = State()
+
+
 
 # =========================================================
 # НАСТРОЙКИ
@@ -44,7 +46,7 @@ class GiveCarState(StatesGroup):
 # set BOT_TOKEN="ТВОЙ_ТОКЕН"
 TOKEN = os.getenv("BOT_TOKEN")
 
-DB_FILE = "zonacarcase.db"
+DB_FILE = os.getenv("DB_FILE", os.path.join(os.getcwd(), "zonacarcase.db"))
 CASE_PRICE = 1_200_000
 CASE_COOLDOWN = 3 * 60 * 60  # 3 часа
 AUCTION_INTERVAL = 60 * 60  # новый лот каждый час
@@ -52,8 +54,37 @@ AUCTION_BID_TIME = 60  # 1 минута после каждой ставки
 AUCTION_MIN_BID = 1_000_000
 AUCTION_BID_STEP = 500_000
 ADMIN_ID = 5474546385
-KYIV_TZ = ZoneInfo('Europe/Kyiv')
-MONTHLY_TOP_LIMIT = 10
+
+# Кланы
+CLAN_CREATE_PRICE = 5_000_000
+CLAN_MAX_MEMBERS = 20
+CLAN_NAME_MIN = 3
+CLAN_NAME_MAX = 24
+
+# Автомобильные номера
+# Равный шанс выпадения каждой страны: РФ / Украина / Беларусь / Казахстан.
+PLATE_COUNTRIES = ("🇷🇺 РФ", "🇺🇦 УКРАИНА", "🇧🇾 БЕЛАРУСЬ", "🇰🇿 КАЗАХСТАН")
+RU_PLATE_LETTERS = "АВЕКМНОРСТУХ"  # разрешённый набор букв для обычных РФ номеров
+UA_PLATE_LETTERS = "АВСЕНІКМОРТХ"  # буквы украинских знаков с латинскими графическими аналогами
+BY_PLATE_LETTERS = "ABCEHKMOPTX"
+KZ_PLATE_LETTERS = "ABCEHKMOPTX"
+RU_REGION_CODES = [
+    "01","02","03","04","05","06","07","08","09","10","11","12","13","14","15","16","17","18","19","20",
+    "21","22","23","24","25","26","27","28","29","30","31","32","33","34","35","36","37","38","39","40",
+    "41","42","43","44","45","46","47","48","49","50","51","52","53","54","55","56","57","58","59","60",
+    "61","62","63","64","65","66","67","68","69","70","71","72","73","74","75","76","77","78","79","80",
+    "81","82","83","84","85","86","87","89","90","91","92","93","94","95","96","97","98","99",
+    "102","116","121","122","123","124","125","126","134","136","138","142","147","150","152","154","156","159","161","163","164","169","172","173","174","176","177","178","180","181","182","186","188","190","193","196","197","198","199","750","777","790","797","799","977","977"
+]
+UA_REGION_CODES = [
+    "AA","AB","AC","AE","AH","AI","AK","AM","AO","AP","AT","AX",
+    "BA","BB","BC","BE","BH","BI","BK","BM","BO","BT","BX",
+    "CA","CE","CH","CK","CM","CO","CP","CT","CX",
+    "HA","HB","HC","HE","HH","HI","HK","HM","HO","HT","HX",
+    "IA","IB","IC","IE","IH","II","IK","IM","IO","IP","IT","IX"
+]
+BY_REGION_CODES = ["1","2","3","4","5","6","7"]
+KZ_REGION_CODES = [f"{i:02d}" for i in range(1, 21)]
 
 # Контейнеры: покупаются отдельно от обычного кейса.
 # Внутри каждого контейнера выпадает 1 машина из указанных редкостей.
@@ -90,6 +121,137 @@ RARITIES = {
 
 RARITY_ORDER = ["Common", "Uncommon", "Rare", "Epic", "Legendary", "Exclusive", "Secret"]
 
+# Система из 100 уровней. Уровень определяется по накопленному XP.
+# Порог XP растёт по формуле: 250 * (уровень - 1)^2.
+# Поэтому 100-й уровень требует 2 450 250 XP.
+LEVELS = [
+    (1, 0, "Новичок"),
+    (2, 250, "Новичок"),
+    (3, 1000, "Новичок"),
+    (4, 2250, "Новичок"),
+    (5, 4000, "Новичок"),
+    (6, 6250, "Ученик"),
+    (7, 9000, "Ученик"),
+    (8, 12250, "Ученик"),
+    (9, 16000, "Ученик"),
+    (10, 20250, "Ученик"),
+    (11, 25000, "Любитель"),
+    (12, 30250, "Любитель"),
+    (13, 36000, "Любитель"),
+    (14, 42250, "Любитель"),
+    (15, 49000, "Любитель"),
+    (16, 56250, "Игрок"),
+    (17, 64000, "Игрок"),
+    (18, 72250, "Игрок"),
+    (19, 81000, "Игрок"),
+    (20, 90250, "Игрок"),
+    (21, 100000, "Автолюбитель"),
+    (22, 110250, "Автолюбитель"),
+    (23, 121000, "Автолюбитель"),
+    (24, 132250, "Автолюбитель"),
+    (25, 144000, "Автолюбитель"),
+    (26, 156250, "Водитель"),
+    (27, 169000, "Водитель"),
+    (28, 182250, "Водитель"),
+    (29, 196000, "Водитель"),
+    (30, 210250, "Водитель"),
+    (31, 225000, "Гонщик"),
+    (32, 240250, "Гонщик"),
+    (33, 256000, "Гонщик"),
+    (34, 272250, "Гонщик"),
+    (35, 289000, "Гонщик"),
+    (36, 306250, "Коллекционер"),
+    (37, 324000, "Коллекционер"),
+    (38, 342250, "Коллекционер"),
+    (39, 361000, "Коллекционер"),
+    (40, 380250, "Коллекционер"),
+    (41, 400000, "Продвинутый"),
+    (42, 420250, "Продвинутый"),
+    (43, 441000, "Продвинутый"),
+    (44, 462250, "Продвинутый"),
+    (45, 484000, "Продвинутый"),
+    (46, 506250, "Профи"),
+    (47, 529000, "Профи"),
+    (48, 552250, "Профи"),
+    (49, 576000, "Профи"),
+    (50, 600250, "Профи"),
+    (51, 625000, "Эксперт"),
+    (52, 650250, "Эксперт"),
+    (53, 676000, "Эксперт"),
+    (54, 702250, "Эксперт"),
+    (55, 729000, "Эксперт"),
+    (56, 756250, "Мастер"),
+    (57, 784000, "Мастер"),
+    (58, 812250, "Мастер"),
+    (59, 841000, "Мастер"),
+    (60, 870250, "Мастер"),
+    (61, 900000, "Ветеран"),
+    (62, 930250, "Ветеран"),
+    (63, 961000, "Ветеран"),
+    (64, 992250, "Ветеран"),
+    (65, 1024000, "Ветеран"),
+    (66, 1056250, "Чемпион"),
+    (67, 1089000, "Чемпион"),
+    (68, 1122250, "Чемпион"),
+    (69, 1156000, "Чемпион"),
+    (70, 1190250, "Чемпион"),
+    (71, 1225000, "Элита"),
+    (72, 1260250, "Элита"),
+    (73, 1296000, "Элита"),
+    (74, 1332250, "Элита"),
+    (75, 1369000, "Элита"),
+    (76, 1406250, "Легенда"),
+    (77, 1444000, "Легенда"),
+    (78, 1482250, "Легенда"),
+    (79, 1521000, "Легенда"),
+    (80, 1560250, "Легенда"),
+    (81, 1600000, "Миф"),
+    (82, 1640250, "Миф"),
+    (83, 1681000, "Миф"),
+    (84, 1722250, "Миф"),
+    (85, 1764000, "Миф"),
+    (86, 1806250, "Король дорог"),
+    (87, 1849000, "Король дорог"),
+    (88, 1892250, "Король дорог"),
+    (89, 1936000, "Король дорог"),
+    (90, 1980250, "Король дорог"),
+    (91, 2025000, "Император дорог"),
+    (92, 2070250, "Император дорог"),
+    (93, 2116000, "Император дорог"),
+    (94, 2162250, "Император дорог"),
+    (95, 2209000, "Император дорог"),
+    (96, 2256250, "Бог автомобилей"),
+    (97, 2304000, "Бог автомобилей"),
+    (98, 2352250, "Бог автомобилей"),
+    (99, 2401000, "Бог автомобилей"),
+    (100, 2450250, "Бог автомобилей"),
+]
+
+def get_level_info(xp):
+    """Возвращает (уровень, название, XP_текущего_уровня, XP_до_следующего, прогресс_%) ."""
+    xp = max(0, int(xp or 0))
+    current = LEVELS[0]
+    next_level = None
+    for item in LEVELS:
+        if xp >= item[1]:
+            current = item
+        else:
+            next_level = item
+            break
+
+    level, start_xp, title = current
+    if next_level:
+        next_xp = next_level[1]
+        progress = int((xp - start_xp) / max(1, next_xp - start_xp) * 100)
+    else:
+        next_xp = None
+        progress = 100
+    return level, title, start_xp, next_xp, min(100, max(0, progress))
+
+def level_bar(progress, size=10):
+    filled = round(size * progress / 100)
+    return "🟩" * filled + "⬜" * (size - filled)
+
 # Все автомобили добавляются вручную через админ-панель.
 # В файле нет предзаполненного списка машин.
 
@@ -102,7 +264,10 @@ CARS_BY_RARITY = {rarity: [] for rarity in RARITY_ORDER}
 # =========================================================
 
 def db():
-    conn = sqlite3.connect(DB_FILE, timeout=10)
+    # SQLite сохраняется между переподключениями бота: переподключение Telegram
+    # не пересоздаёт базу и не удаляет данные игроков/машины.
+    conn = sqlite3.connect(DB_FILE, timeout=30)
+
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -171,6 +336,23 @@ def init_db():
             )
         """)
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS clans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                owner_id INTEGER NOT NULL,
+                created_at REAL NOT NULL DEFAULT 0
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS clan_members (
+                clan_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL UNIQUE,
+                role TEXT NOT NULL DEFAULT 'member',
+                joined_at REAL NOT NULL DEFAULT 0,
+                PRIMARY KEY (clan_id, user_id)
+            )
+        """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS promo_codes (
                 code TEXT PRIMARY KEY,
                 reward INTEGER NOT NULL,
@@ -188,18 +370,12 @@ def init_db():
             )
         """)
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS monthly_stats (
+            CREATE TABLE IF NOT EXISTS plates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
-                month TEXT NOT NULL,
-                xp INTEGER NOT NULL DEFAULT 0,
-                cases_opened INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (user_id, month)
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS monthly_reports (
-                month TEXT PRIMARY KEY,
-                sent_at REAL NOT NULL DEFAULT 0
+                country TEXT NOT NULL,
+                plate TEXT NOT NULL UNIQUE,
+                created_at REAL NOT NULL DEFAULT 0
             )
         """)
 
@@ -228,6 +404,57 @@ def init_db():
         # Starter promo codes. They are created only once and can be disabled by admin.
         conn.execute("INSERT OR IGNORE INTO promo_codes(code, reward, max_uses) VALUES ('ZONA100', 100000, 0)")
         conn.execute("INSERT OR IGNORE INTO promo_codes(code, reward, max_uses) VALUES ('START500', 500000, 0)")
+
+
+def _rand_letters(alphabet, count):
+    return "".join(random.choice(alphabet) for _ in range(count))
+
+
+def generate_random_plate(country=None):
+    """Генерирует случайный гражданский номер одной из 4 стран."""
+    country = country or random.choice(PLATE_COUNTRIES)
+    if country == "🇷🇺 РФ":
+        # Формат: X000XX + код региона.
+        return f"{random.choice(RU_PLATE_LETTERS)}{random.randint(0,999):03d}{_rand_letters(RU_PLATE_LETTERS,2)} {random.choice(RU_REGION_CODES)}", country
+    if country == "🇺🇦 УКРАИНА":
+        # Формат: AA 1234 AA.
+        return f"{_rand_letters(UA_PLATE_LETTERS,2)} {random.randint(0,9999):04d} {_rand_letters(UA_PLATE_LETTERS,2)}", country
+    if country == "🇧🇾 БЕЛАРУСЬ":
+        # Формат: 1234 AB-7.
+        return f"{random.randint(0,9999):04d} {_rand_letters(BY_PLATE_LETTERS,2)}-{random.choice(BY_REGION_CODES)}", country
+    # Казахстан: 123 ABC 01.
+    return f"{random.randint(1,999):03d} {_rand_letters(KZ_PLATE_LETTERS,3)} {random.choice(KZ_REGION_CODES)}", country
+
+
+def give_random_plate(user_id):
+    """Выдаёт уникальный случайный номер и сохраняет его в БД."""
+    for _ in range(100):
+        plate, country = generate_random_plate()
+        try:
+            with db() as conn:
+                conn.execute(
+                    "INSERT INTO plates(user_id,country,plate,created_at) VALUES(?,?,?,?)",
+                    (user_id, country, plate, time.time())
+                )
+            return country, plate
+        except sqlite3.IntegrityError:
+            continue
+    # Крайне маловероятный fallback.
+    with db() as conn:
+        plate, country = generate_random_plate()
+        conn.execute(
+            "INSERT INTO plates(user_id,country,plate,created_at) VALUES(?,?,?,?)",
+            (user_id, country, plate + "*", time.time())
+        )
+    return country, plate + "*"
+
+
+def get_user_plates(user_id, limit=10):
+    with db() as conn:
+        return conn.execute(
+            "SELECT country, plate, created_at FROM plates WHERE user_id=? ORDER BY id DESC LIMIT ?",
+            (user_id, limit)
+        ).fetchall()
 
 
 def load_custom_cars():
@@ -322,34 +549,10 @@ def add_balance(user_id, amount):
         conn.execute("UPDATE users SET balance=balance+? WHERE user_id=?", (int(amount), user_id))
 
 
-def current_month():
-    return datetime.now(KYIV_TZ).strftime("%Y-%m")
-
-
-def add_monthly_xp(conn, user_id, amount):
-    month = current_month()
-    conn.execute("""
-        INSERT INTO monthly_stats(user_id, month, xp)
-        VALUES (?, ?, ?)
-        ON CONFLICT(user_id, month) DO UPDATE SET xp=xp+excluded.xp
-    """, (user_id, month, int(amount)))
-
-
-def add_monthly_case(conn, user_id):
-    month = current_month()
-    conn.execute("""
-        INSERT INTO monthly_stats(user_id, month, cases_opened)
-        VALUES (?, ?, 1)
-        ON CONFLICT(user_id, month) DO UPDATE SET cases_opened=cases_opened+1
-    """, (user_id, month))
-
-
 def add_xp(user_id, amount):
     ensure_user(user_id)
-    amount = int(amount)
     with db() as conn:
-        conn.execute("UPDATE users SET xp=xp+? WHERE user_id=?", (amount, user_id))
-        add_monthly_xp(conn, user_id, amount)
+        conn.execute("UPDATE users SET xp=xp+? WHERE user_id=?", (int(amount), user_id))
 
 
 def add_car(user_id, car_id, amount=1):
@@ -377,6 +580,234 @@ def get_garage(user_id, rarity=None):
 def garage_summary(user_id):
     items = get_garage(user_id)
     return len(items), sum(amount for _, amount in items)
+
+
+# =========================================================
+# CLANS
+# =========================================================
+
+def get_user_clan(user_id):
+    """Возвращает клан игрока или None."""
+    with db() as conn:
+        return conn.execute("""
+            SELECT c.*, cm.role
+            FROM clan_members cm
+            JOIN clans c ON c.id = cm.clan_id
+            WHERE cm.user_id=?
+        """, (user_id,)).fetchone()
+
+
+def get_clan_member_count(clan_id):
+    with db() as conn:
+        row = conn.execute("SELECT COUNT(*) AS cnt FROM clan_members WHERE clan_id=?", (clan_id,)).fetchone()
+    return int(row["cnt"])
+
+
+def get_clan_members(clan_id):
+    with db() as conn:
+        return conn.execute("""
+            SELECT cm.user_id, cm.role, cm.joined_at, u.username, u.first_name, u.xp, u.balance
+            FROM clan_members cm
+            LEFT JOIN users u ON u.user_id = cm.user_id
+            WHERE cm.clan_id=?
+            ORDER BY CASE WHEN cm.role='owner' THEN 0 ELSE 1 END, u.xp DESC, cm.joined_at ASC
+        """, (clan_id,)).fetchall()
+
+
+def get_clan_by_id(clan_id):
+    with db() as conn:
+        return conn.execute("SELECT * FROM clans WHERE id=?", (clan_id,)).fetchone()
+
+
+def create_clan(owner_id, name):
+    name = " ".join(name.strip().split())
+    if not (CLAN_NAME_MIN <= len(name) <= CLAN_NAME_MAX):
+        return False, "❌ Название клана должно быть от 3 до 24 символов."
+    if any(ord(ch) < 32 for ch in name):
+        return False, "❌ Некорректное название клана."
+    ensure_user(owner_id)
+    with db() as conn:
+        existing = conn.execute("SELECT id FROM clan_members WHERE user_id=?", (owner_id,)).fetchone()
+        if existing:
+            return False, "❌ Ты уже состоишь в клане. Сначала выйди из текущего клана."
+        duplicate = conn.execute("SELECT id FROM clans WHERE name=? COLLATE NOCASE", (name,)).fetchone()
+        if duplicate:
+            return False, "❌ Клан с таким названием уже существует."
+        user = conn.execute("SELECT balance FROM users WHERE user_id=?", (owner_id,)).fetchone()
+        if not user or user["balance"] < CLAN_CREATE_PRICE:
+            return False, f"❌ Для создания клана нужно {money(CLAN_CREATE_PRICE)}."
+        now = time.time()
+        cur = conn.execute("INSERT INTO clans(name, owner_id, created_at) VALUES(?,?,?)", (name, owner_id, now))
+        clan_id = cur.lastrowid
+        conn.execute("INSERT INTO clan_members(clan_id,user_id,role,joined_at) VALUES(?,?,?,?)", (clan_id, owner_id, "owner", now))
+        conn.execute("UPDATE users SET balance=balance-? WHERE user_id=?", (CLAN_CREATE_PRICE, owner_id))
+    return get_clan_by_id(clan_id), None
+
+
+def join_clan(user_id, clan_id):
+    ensure_user(user_id)
+    with db() as conn:
+        clan = conn.execute("SELECT * FROM clans WHERE id=?", (clan_id,)).fetchone()
+        if not clan:
+            return False, "❌ Клан не найден."
+        existing = conn.execute("SELECT clan_id FROM clan_members WHERE user_id=?", (user_id,)).fetchone()
+        if existing:
+            if existing["clan_id"] == clan_id:
+                return False, "⚠️ Ты уже в этом клане."
+            return False, "❌ Ты уже состоишь в другом клане."
+        count = conn.execute("SELECT COUNT(*) AS cnt FROM clan_members WHERE clan_id=?", (clan_id,)).fetchone()["cnt"]
+        if count >= CLAN_MAX_MEMBERS:
+            return False, f"❌ Клан заполнен. Максимум: {CLAN_MAX_MEMBERS} участников."
+        conn.execute("INSERT INTO clan_members(clan_id,user_id,role,joined_at) VALUES(?,?,?,?)", (clan_id, user_id, "member", time.time()))
+    return True, None
+
+
+def leave_clan(user_id):
+    with db() as conn:
+        row = conn.execute("SELECT clan_id, role FROM clan_members WHERE user_id=?", (user_id,)).fetchone()
+        if not row:
+            return False, "❌ Ты не состоишь в клане."
+        if row["role"] == "owner":
+            return False, "👑 Владелец не может просто выйти. Передай клан другому игроку или расформируй его."
+        conn.execute("DELETE FROM clan_members WHERE user_id=?", (user_id,))
+    return True, None
+
+
+def disband_clan(owner_id):
+    with db() as conn:
+        clan = conn.execute("SELECT * FROM clans WHERE owner_id=?", (owner_id,)).fetchone()
+        if not clan:
+            return False, "❌ Ты не являешься владельцем клана."
+        conn.execute("DELETE FROM clan_members WHERE clan_id=?", (clan["id"],))
+        conn.execute("DELETE FROM clans WHERE id=?", (clan["id"],))
+    return True, None
+
+
+def kick_clan_member(owner_id, target_id):
+    with db() as conn:
+        clan = conn.execute("SELECT * FROM clans WHERE owner_id=?", (owner_id,)).fetchone()
+        if not clan:
+            return False, "❌ Только владелец может исключать участников."
+        target = conn.execute("SELECT role FROM clan_members WHERE clan_id=? AND user_id=?", (clan["id"], target_id)).fetchone()
+        if not target:
+            return False, "❌ Игрок не найден в твоём клане."
+        if target["role"] == "owner":
+            return False, "❌ Нельзя исключить владельца."
+        conn.execute("DELETE FROM clan_members WHERE clan_id=? AND user_id=?", (clan["id"], target_id))
+    return True, None
+
+
+def clan_player_name(row):
+    if row["username"]:
+        return "@" + row["username"]
+    if row["first_name"]:
+        return row["first_name"]
+    return f"ID {row['user_id']}"
+
+
+def clan_list_text():
+    with db() as conn:
+        clans = conn.execute("""
+            SELECT c.id, c.name, c.owner_id, COUNT(cm.user_id) AS members
+            FROM clans c
+            LEFT JOIN clan_members cm ON cm.clan_id=c.id
+            GROUP BY c.id
+            ORDER BY members DESC, c.created_at ASC
+            LIMIT 10
+        """).fetchall()
+    if not clans:
+        return "💀 <b>КЛАНЫ</b>\n\nПока нет ни одного клана. Создай первый!", []
+    lines = ["💀 <b>КЛАНЫ</b>", "", "🏆 <b>ТОП КЛАНОВ</b>", ""]
+    for i, clan in enumerate(clans, 1):
+        lines.append(f"{i}. 💀 <b>{escape(clan['name'])}</b> — {clan['members']}/{CLAN_MAX_MEMBERS}")
+    return "\n".join(lines), clans
+
+
+def clans_keyboard():
+    kb = InlineKeyboardBuilder()
+    with db() as conn:
+        clans = conn.execute("""
+            SELECT c.id, c.name, COUNT(cm.user_id) AS members
+            FROM clans c LEFT JOIN clan_members cm ON cm.clan_id=c.id
+            GROUP BY c.id ORDER BY members DESC, c.created_at ASC LIMIT 10
+        """).fetchall()
+    for clan in clans:
+        kb.button(text=f"💀 {clan['name']} • {clan['members']}/{CLAN_MAX_MEMBERS}", callback_data=f"clan:view:{clan['id']}")
+    kb.button(text="➕ Создать клан", callback_data="clan:create")
+    kb.button(text="🔄 Обновить", callback_data="clan:list")
+    kb.button(text="🏠 Меню", callback_data="back_menu")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def clan_view_keyboard(clan_id, user_id):
+    kb = InlineKeyboardBuilder()
+    my_clan = get_user_clan(user_id)
+    if my_clan and my_clan["id"] == clan_id:
+        kb.button(text="👥 Участники", callback_data=f"clan:members:{clan_id}")
+        if my_clan["role"] == "owner":
+            kb.button(text="🗑 Расформировать", callback_data="clan:disband")
+        else:
+            kb.button(text="🚪 Выйти из клана", callback_data="clan:leave")
+    elif not my_clan:
+        kb.button(text="✅ Вступить", callback_data=f"clan:join:{clan_id}")
+    kb.button(text="⬅️ Кланы", callback_data="clan:list")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def my_clan_keyboard(user_id):
+    clan = get_user_clan(user_id)
+    kb = InlineKeyboardBuilder()
+    if not clan:
+        kb.button(text="💀 Найти клан", callback_data="clan:list")
+        kb.button(text="➕ Создать клан", callback_data="clan:create")
+    else:
+        kb.button(text="👥 Участники", callback_data=f"clan:members:{clan['id']}")
+        if clan["role"] == "owner":
+            kb.button(text="🗑 Расформировать", callback_data="clan:disband")
+        else:
+            kb.button(text="🚪 Выйти из клана", callback_data="clan:leave")
+        kb.button(text="💀 Клан", callback_data=f"clan:view:{clan['id']}")
+    kb.button(text="🏠 Меню", callback_data="back_menu")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def clan_members_keyboard(clan, user_id):
+    kb = InlineKeyboardBuilder()
+    if clan["owner_id"] == user_id:
+        members = get_clan_members(clan["id"])
+        for m in members:
+            if m["user_id"] != user_id:
+                kb.button(text=f"❌ Исключить {clan_player_name(m)}", callback_data=f"clan:kick:{m['user_id']}")
+    kb.button(text="⬅️ Клан", callback_data=f"clan:view:{clan['id']}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def clan_text(clan):
+    members = get_clan_members(clan["id"])
+    owner = next((m for m in members if m["role"] == "owner"), None)
+    total_xp = sum(int(m["xp"] or 0) for m in members)
+    return (
+        f"💀 <b>КЛАН «{escape(clan['name'])}»</b>\n"
+        "━━━━━━━━━━━━━━\n\n"
+        f"👑 Владелец: <b>{escape(clan_player_name(owner)) if owner else '—'}</b>\n"
+        f"👥 Участники: <b>{len(members)}/{CLAN_MAX_MEMBERS}</b>\n"
+        f"⭐ Общий XP: <b>{total_xp}</b>\n"
+        f"📅 Создан: <b>{time.strftime('%d.%m.%Y', time.localtime(clan['created_at']))}</b>\n\n"
+        "🎯 Цель клана — собирать коллекцию, развивать аккаунты и подниматься в топе."
+    )
+
+
+def clan_members_text(clan):
+    members = get_clan_members(clan["id"])
+    lines = [f"👥 <b>УЧАСТНИКИ «{escape(clan['name'])}»</b>", ""]
+    for i, m in enumerate(members, 1):
+        role = "👑" if m["role"] == "owner" else "👤"
+        lines.append(f"{i}. {role} <b>{escape(clan_player_name(m))}</b> — {m['xp']} XP")
+    return "\n".join(lines)
 
 
 def get_container_amount(user_id, container_id):
@@ -583,15 +1014,34 @@ async def auction_loop(bot):
 # =========================================================
 
 def main_keyboard():
+    """Главная клавиатура в стиле референса: 6 больших кнопок 2x3."""
     kb = ReplyKeyboardBuilder()
     for text in [
-        "🚘 Открыть авто", "🏠 Гараж", "📦 Контейнеры", "👤 Профиль",
-        "📝 Квесты", "🏆 Сезон", "🎁 Промокод", "👥 Реферальная ссылка",
-        "🎁 Бонус дня", "🏆 Лидеры",
+        "🔢 Получить номер", "🚘 Получить тачку",
+        "📋 Меню", "🗂 Коллекция",
+        "💀 Кланы", "💀 Мой клан",
     ]:
         kb.button(text=text)
-    kb.adjust(2, 2, 2, 2, 2)
-    return kb.as_markup(resize_keyboard=True)
+    kb.adjust(2, 2, 2)
+    return kb.as_markup(resize_keyboard=True, is_persistent=True)
+
+
+def extended_menu_keyboard():
+    """Главное меню в стиле референса PLATE: 2 колонки."""
+    kb = ReplyKeyboardBuilder()
+    for text in [
+        "🎁 Маркет", "🔥 Лимитки",
+        "🎟 Билеты", "🎯 Сезонная сетка",
+        "💀 Кланы", "🔫 Лут",
+        "💵 На учёт", "🏎 Тюнинг",
+        "🚙 Концепты", "🔄 Обмены",
+        "🏆 Лидеры", "📱 Профиль",
+        "🔢 Коллекция номеров", "🗂 Коллекция",
+        "🔙 Назад",
+    ]:
+        kb.button(text=text)
+    kb.adjust(2, 2, 2, 2, 2, 2, 2, 1)
+    return kb.as_markup(resize_keyboard=True, is_persistent=True)
 
 
 def case_keyboard():
@@ -640,6 +1090,102 @@ def garage_keyboard():
     return kb.as_markup()
 
 
+def collection_keyboard(user_id, page=0, total=0):
+    """Меню коллекции в стиле референса PLATE."""
+    kb = InlineKeyboardBuilder()
+    total_pages = max(1, total)
+    page = max(0, min(page, total_pages - 1))
+
+    kb.button(text="⏮", callback_data="collection:page:0")
+    kb.button(text="◀️", callback_data=f"collection:page:{max(0, page-1)}")
+    kb.button(text=f"{page+1}/{total_pages}", callback_data="noop")
+    kb.button(text="▶️", callback_data=f"collection:page:{min(total_pages-1, page+1)}")
+    kb.button(text="⏭", callback_data=f"collection:page:{total_pages-1}")
+
+    # Счётчик машин в коллекции. Кнопки оставлены как отдельные действия,
+    # чтобы интерфейс был таким же, как на референсе.
+    owned_total = get_total_garage_amount(user_id)
+    kb.button(text="➖", callback_data="collection:minus")
+    kb.button(text=f"{owned_total}/20", callback_data="collection:count")
+    kb.button(text="➕", callback_data="collection:plus")
+
+    kb.button(text="💎 Редкость", callback_data="collection:rarity")
+    kb.button(text="🏷 Бренд", callback_data="collection:brand")
+    kb.button(text="🔢 Учет", callback_data="collection:accounting")
+    kb.button(text="🟪 Дубли", callback_data="collection:duplicates")
+    kb.button(text="🍂 Сезоны", callback_data="collection:seasons")
+    kb.button(text="🔎 Поиск", callback_data="collection:search")
+    kb.button(text="🚫 Выбрано", callback_data="collection:selected")
+    kb.button(text="🚫 Фильтры", callback_data="collection:filters")
+    kb.button(text="❌ Скрыть авто в коллекциях", callback_data="collection:hide")
+    kb.button(text="🔙 Назад", callback_data="back_menu")
+    kb.adjust(5, 3, 2, 2, 2, 2, 1, 1)
+    return kb.as_markup()
+
+
+def number_collection_keyboard(user_id, page=0, total=0):
+    """Коллекция номеров в стиле референса PLATE."""
+    kb = InlineKeyboardBuilder()
+    total_pages = max(1, total)
+    page = max(0, min(page, total_pages - 1))
+    owned_count = len(get_user_plates(user_id, 100000))
+
+    # Навигация по номерам
+    kb.button(text="⏮", callback_data="plates:page:0")
+    kb.button(text="◀️", callback_data=f"plates:page:{max(0, page-1)}")
+    kb.button(text=f"{page+1}/{total_pages}", callback_data="plates:noop")
+    kb.button(text="▶️", callback_data=f"plates:page:{min(total_pages-1, page+1)}")
+    kb.button(text="⏭", callback_data=f"plates:page:{total_pages-1}")
+
+    # Счётчик коллекции
+    kb.button(text="➖", callback_data="plates:minus")
+    kb.button(text=str(owned_count), callback_data="plates:count")
+    kb.button(text="➕", callback_data="plates:plus")
+
+    # Фильтры как на референсе
+    kb.button(text="🌍 Страна", callback_data="plates:country")
+    kb.button(text="🏷 Тип", callback_data="plates:type")
+    kb.button(text="🔢 Учет", callback_data="plates:accounting")
+    kb.button(text="📦 Дубликаты", callback_data="plates:duplicates")
+    kb.button(text="🔎 Поиск", callback_data="plates:search")
+    kb.button(text="📊 Фильтры", callback_data="plates:filters")
+    kb.button(text="❌ Скрыть уже имеющиеся", callback_data="plates:hide")
+    kb.button(text="🔙 Назад", callback_data="back_menu")
+    kb.adjust(5, 3, 2, 2, 2, 1, 1)
+    return kb.as_markup()
+
+
+async def show_number_collection(message, user_id, page=0, edit=False):
+    """Открывает коллекцию номеров в формате, максимально близком к референсу PLATE."""
+    plates = get_user_plates(user_id, 100000)
+    total = len(plates)
+
+    # В шапке коллекции показываем только сводку и активные фильтры,
+    # как на референсе. Подробная информация о номере открывается
+    # отдельным нажатием/перелистыванием.
+    text = (
+        "📦 <b>Коллекция номеров</b>\n"
+        f"📄 У вас уже есть: <b>{total}</b> номеров\n"
+        "────────────────────\n"
+        "📌 <b>Доступные фильтры:</b>\n"
+        "🌍 Страна: <b>Все</b>\n"
+        "🏷 Тип: <b>Все</b>\n"
+        "🔢 Учет: <b>Все</b>\n"
+        "📦 Дубликаты: <b>Все</b>\n"
+        "🔎 Поиск: <b>Выкл</b>\n"
+        "📊 Фильтры: <b>Выкл</b>\n"
+        "────────────────────\n"
+        "ℹ️ Выберите номер, чтобы посмотреть подробную информацию"
+    )
+
+    # Даже при пустой коллекции оставляем интерфейс и пагинацию доступными.
+    markup = number_collection_keyboard(user_id, page if total else 0, total if total else 1)
+    if edit:
+        await message.edit_text(text, reply_markup=markup, parse_mode="HTML")
+    else:
+        await message.answer(text, reply_markup=markup, parse_mode="HTML")
+
+
 def garage_page_keyboard(items, page, rarity):
     kb = InlineKeyboardBuilder()
     start = page * 8
@@ -671,7 +1217,6 @@ def car_keyboard(car_id):
 def admin_keyboard():
     kb = InlineKeyboardBuilder()
     kb.button(text="📊 Статистика", callback_data="admin:stats")
-    kb.button(text="🏆 Топ за месяц", callback_data="admin:monthly_top")
     kb.button(text="🚘 Выдать машину", callback_data="admin:give_car")
     kb.button(text="➕ Добавить машину", callback_data="admin:add_car")
     kb.button(text="📋 Мои добавленные машины", callback_data="admin:custom_cars")
@@ -690,6 +1235,52 @@ def rarity_text():
         r = RARITIES[rarity]
         lines.append(f"{r['emoji']} <b>{rarity}</b> — {r['chance']}% • {len(CARS_BY_RARITY[rarity])} машин")
     return "\n".join(lines)
+
+
+def get_total_garage_amount(user_id):
+    with db() as conn:
+        row = conn.execute("SELECT COALESCE(SUM(amount), 0) AS total FROM garage WHERE user_id=?", (user_id,)).fetchone()
+        return int(row["total"] if row else 0)
+
+
+def get_collection_items(user_id):
+    return get_garage(user_id, None)
+
+
+async def show_collection(message, user_id, page=0, edit=False):
+    """Показывает коллекцию по одной машине с навигацией как на референсе."""
+    items = get_collection_items(user_id)
+    if not items:
+        text = (
+            "🗂 <b>КОЛЛЕКЦИЯ</b>\n\n"
+            "У тебя пока нет машин.\n"
+            "Открой кейс, чтобы получить первую машину!"
+        )
+        markup = collection_keyboard(user_id, 0, 1)
+        if edit:
+            await message.edit_text(text, reply_markup=markup, parse_mode="HTML")
+        else:
+            await message.answer(text, reply_markup=markup, parse_mode="HTML")
+        return
+
+    page = max(0, min(page, len(items)-1))
+    car, amount = items[page]
+    r = RARITIES[car["rarity"]]
+    text = (
+        f"🗂 <b>КОЛЛЕКЦИЯ</b>\n\n"
+        f"🚘 <b>{escape(car['name'])}</b>\n"
+        f"{r['emoji']} Редкость: <b>{escape(car['rarity'])}</b>\n"
+        f"📅 Год: <b>{car['year']}</b>\n"
+        f"⚡ Мощность: <b>{car['power']} л.с.</b>\n"
+        f"💰 Цена: <b>{money(car['price'])}</b>\n"
+        f"📦 Кол-во: <b>{amount} шт.</b>\n\n"
+        f"🚘 Машина <b>{page+1}</b> из <b>{len(items)}</b>"
+    )
+    markup = collection_keyboard(user_id, page, len(items))
+    if edit:
+        await message.edit_text(text, reply_markup=markup, parse_mode="HTML")
+    else:
+        await message.answer(text, reply_markup=markup, parse_mode="HTML")
 
 
 async def show_garage_page(message, user_id, rarity, page=0, edit=False):
@@ -742,24 +1333,311 @@ async def start(message: Message):
     )
 
 
+MENU_STUBS = {
+    "🎁 Маркет": "🎁 <b>МАРКЕТ</b>\n\nРаздел маркета пока находится в разработке.",
+    "🔥 Лимитки": "🔥 <b>ЛИМИТКИ</b>\n\nЗдесь будут редкие лимитированные машины и предметы.",
+    "🎟 Билеты": "🎟 <b>БИЛЕТЫ</b>\n\nЗдесь будут твои билеты и доступные награды.",
+    "🎯 Сезонная сетка": "🎯 <b>СЕЗОННАЯ СЕТКА</b>\n\nЗдесь будет прогресс сезонных заданий и наград.",
+    "🔫 Лут": "🔫 <b>ЛУТ</b>\n\nЗдесь будет раздел с полученными предметами и наградами.",
+    "💵 На учёт": "💵 <b>НА УЧЁТ</b>\n\nЗдесь будет постановка автомобилей на учёт.",
+    "🏎 Тюнинг": "🏎 <b>ТЮНИНГ</b>\n\nЗдесь будет настройка и улучшение автомобилей.",
+    "🚙 Концепты": "🚙 <b>КОНЦЕПТЫ</b>\n\nЗдесь будут концептуальные автомобили.",
+    "🔄 Обмены": "🔄 <b>ОБМЕНЫ</b>\n\nЗдесь будет обмен автомобилями и номерами между игроками.",
+}
+
+for _menu_text, _menu_text_response in MENU_STUBS.items():
+    @dp.message(lambda m, t=_menu_text: m.text == t)
+    async def _menu_stub(message: Message, response=_menu_text_response):
+        await message.answer(response, reply_markup=extended_menu_keyboard(), parse_mode="HTML")
+
+
 @dp.message(lambda m: m.text == "👤 Профиль")
 async def profile(message: Message):
     user = get_user(message.from_user.id)
     unique, total = garage_summary(message.from_user.id)
-    level = user["xp"] // 1000 + 1
-    current_xp = user["xp"] % 1000
-    progress = int(current_xp / 1000 * 10)
-    xp_bar = "🟩" * progress + "⬜" * (10-progress)
+    level, title, start_xp, next_xp, progress = get_level_info(user["xp"])
+    xp_bar = level_bar(progress)
+    current_xp = max(0, int(user["xp"]) - start_xp)
+    level_goal = (str(next_xp) if next_xp is not None else "MAX")
     await message.answer(
         "👤 <b>ТВОЙ ПРОФИЛЬ</b>\n━━━━━━━━━━━━━━\n\n"
         f"💰 Баланс: <b>{money(user['balance'])}</b>\n"
-        f"⭐ Уровень: <b>{level}</b>\n{xp_bar} <b>{current_xp}/1000 XP</b>\n\n"
+        f"🏆 Уровень: <b>{level} — {title}</b>\n{xp_bar} <b>{current_xp} XP</b> → <b>{level_goal}</b>\n\n"
         f"🚘 Уникальных: <b>{unique}/{len(CARS)}</b>\n📦 Всего машин: <b>{total}</b>\n"
+        f"🔢 Номеров: <b>{len(get_user_plates(message.from_user.id, 100000))}</b>\n"
         f"🎁 Открыто кейсов: <b>{user['cases_opened']}</b>\n"
         f"👥 Рефералов: <b>{user['referrals']}</b>\n"
         f"💸 Заработано с рефералов: <b>{money(user['referral_earned'])}</b>",
         parse_mode="HTML"
     )
+
+# =========================================================
+# REFERENCE MAIN BUTTONS
+# =========================================================
+
+@dp.message(lambda m: m.text == "🔢 Получить номер")
+async def get_number_button(message: Message):
+    country, plate = give_random_plate(message.from_user.id)
+    total = 0
+    with db() as conn:
+        row = conn.execute("SELECT COUNT(*) AS cnt FROM plates WHERE user_id=?", (message.from_user.id,)).fetchone()
+        total = int(row["cnt"])
+    await message.answer(
+        "🎉 <b>ТЕБЕ ВЫПАЛ НОВЫЙ НОМЕР!</b>\n\n"
+        f"🌍 Страна: <b>{escape(country)}</b>\n"
+        f"🚘 Номер: <code>{escape(plate)}</code>\n\n"
+        f"📦 Всего твоих номеров: <b>{total}</b>\n\n"
+        "Нажми «🔢 Получить номер» ещё раз — выпадет новый случайный номер.",
+        reply_markup=main_keyboard(),
+        parse_mode="HTML"
+    )
+
+
+@dp.message(lambda m: m.text == "🚘 Получить тачку")
+async def get_car_button(message: Message):
+    # Та же механика, что и у старой кнопки «🚘 Открыть авто».
+    await open_auto(message)
+
+
+@dp.message(lambda m: m.text == "📋 Меню")
+async def reference_menu(message: Message):
+    user_id = message.from_user.id
+    ensure_user(user_id, message.from_user.username or "", message.from_user.first_name or "")
+    user = get_user(user_id)
+    unique, total = garage_summary(user_id)
+    plate_count = len(get_user_plates(user_id, 100000))
+    level, title, start_xp, next_xp, progress = get_level_info(user["xp"])
+    bar = level_bar(progress)
+
+    now = time.time()
+    remaining = max(0, CASE_COOLDOWN - (now - (user["last_case_opened"] or 0)))
+    next_case = "готов" if remaining <= 0 else fmt_time(remaining)
+
+    # Сезон и ключи пока не имеют отдельных игровых таблиц, поэтому показываем
+    # реальные доступные данные без выдумывания значений.
+    streak = int(user["daily_streak"] or 0)
+    username = message.from_user.username or user["username"] or str(user_id)
+    clan = get_user_clan(user_id)
+    clan_name = clan["name"] if clan else "Нет клана"
+
+    text = (
+        "🛠 <b>ПАНЕЛЬ УПРАВЛЕНИЯ:</b>\n\n"
+        f"👤 <b>Логин:</b> <code>{escape(username)}</code>\n"
+        f"🎯 <b>Сезонная сетка:</b> {streak}/6 д.\n"
+        f"🏆 <b>Уровень:</b> {title}\n"
+        f"{bar} <b>{progress}%</b>\n"
+        f"⭐ XP: <b>{int(user['xp'])}</b>" + (f" / {next_xp}" if next_xp else " / MAX") + "\n"
+        f"⏱ <b>След. кейс:</b> {next_case}\n"
+        "🔑 <b>След. ключ:</b> пока не используется\n"
+        f"🔥 <b>Активность:</b> {min(streak, 6)}/6 д.\n"
+        "🌍 <b>Установленные страны номеров:</b> РФ, Украина, Беларусь, Казахстан\n\n"
+        "💼 <b>АККАУНТ:</b>\n"
+        f"💰 Баланс: <b>{money(user['balance'])}</b>\n"
+        f"🔑 Ключей: <b>0</b>\n"
+        f"🎁 Кейсов открыто: <b>{user['cases_opened']}</b>\n"
+        f"📦 Номеров: <b>{plate_count}</b>\n"
+        f"💀 Клан: <b>{escape(clan_name)}</b>\n\n"
+        "📊 <b>СТАТИСТИКА:</b>\n"
+        f"🚘 Уникальных машин: <b>{unique}/{len(CARS)}</b>\n"
+        f"🚗 Всего машин: <b>{total}</b>\n"
+        f"🔢 Всего номеров: <b>{plate_count}</b>\n"
+        f"👥 Рефералов: <b>{user['referrals']}</b>\n\n"
+        "Выбери действие ниже:"
+    )
+    await message.answer(text, reply_markup=extended_menu_keyboard(), parse_mode="HTML")
+
+
+@dp.message(lambda m: m.text == "🗂 Коллекция")
+async def collection_button(message: Message):
+    await show_collection(message, message.from_user.id, 0, edit=False)
+
+
+@dp.message(lambda m: m.text == "🔢 Коллекция номеров")
+async def number_collection_button(message: Message):
+    await show_number_collection(message, message.from_user.id, 0, edit=False)
+
+
+@dp.message(lambda m: m.text == "💀 Кланы")
+async def clans_button(message: Message):
+    text, _ = clan_list_text()
+    await message.answer(text, reply_markup=clans_keyboard(), parse_mode="HTML")
+
+
+@dp.message(lambda m: m.text == "💀 Мой клан")
+async def my_clan_button(message: Message):
+    clan = get_user_clan(message.from_user.id)
+    if not clan:
+        await message.answer(
+            "💀 <b>МОЙ КЛАН</b>\n\n"
+            f"Ты пока не состоишь в клане.\n\n➕ Создание клана: <b>{money(CLAN_CREATE_PRICE)}</b>\n👥 Максимум: <b>{CLAN_MAX_MEMBERS}</b> участников.",
+            reply_markup=my_clan_keyboard(message.from_user.id),
+            parse_mode="HTML"
+        )
+        return
+    await message.answer(clan_text(clan), reply_markup=my_clan_keyboard(message.from_user.id), parse_mode="HTML")
+
+
+@dp.callback_query(lambda c: c.data.startswith("plates:page:"))
+async def plates_page_callback(callback: CallbackQuery):
+    page = int(callback.data.split(":")[2])
+    await show_number_collection(callback.message, callback.from_user.id, page, edit=True)
+    await callback.answer()
+
+
+@dp.callback_query(lambda c: c.data in {
+    "plates:noop", "plates:count", "plates:minus", "plates:plus",
+    "plates:country", "plates:type", "plates:accounting", "plates:duplicates",
+    "plates:search", "plates:filters", "plates:hide"
+})
+async def plates_collection_actions(callback: CallbackQuery):
+    data = callback.data
+    if data == "plates:country":
+        await callback.answer("🌍 Фильтр страны: РФ / Украина / Беларусь / Казахстан", show_alert=True)
+        return
+    if data == "plates:type":
+        await callback.answer("🏷 Тип: обычный гражданский номер", show_alert=True)
+        return
+    if data == "plates:accounting":
+        await callback.answer("🔢 Учёт: в текущей версии номера хранятся без статуса учёта", show_alert=True)
+        return
+    if data == "plates:duplicates":
+        await callback.answer("📦 Дубликатов сейчас: 0", show_alert=True)
+        return
+    if data == "plates:search":
+        await callback.answer("🔎 Поиск номера будет добавлен следующим обновлением.", show_alert=True)
+        return
+    if data == "plates:filters":
+        await callback.answer("📊 Фильтры: страна, тип и статус учёта.", show_alert=True)
+        return
+    if data == "plates:hide":
+        await callback.answer("❌ Скрытие уже имеющихся номеров пока не включено.", show_alert=True)
+        return
+    if data == "plates:minus" or data == "plates:plus":
+        await callback.answer("ℹ️ Счётчик показывает количество твоих номеров.")
+        return
+    await callback.answer()
+
+
+@dp.callback_query(lambda c: c.data == "clan:list")
+async def clan_list_callback(callback: CallbackQuery):
+    text, _ = clan_list_text()
+    await callback.message.edit_text(text, reply_markup=clans_keyboard(), parse_mode="HTML")
+    await callback.answer()
+
+
+@dp.callback_query(lambda c: c.data == "clan:create")
+async def clan_create_start(callback: CallbackQuery, state: FSMContext):
+    if get_user_clan(callback.from_user.id):
+        await callback.answer("❌ Ты уже состоишь в клане.", show_alert=True)
+        return
+    user = get_user(callback.from_user.id)
+    await state.set_state(ClanCreateState.name)
+    await callback.message.answer(
+        "➕ <b>СОЗДАНИЕ КЛАНА</b>\n\n"
+        f"💰 Стоимость: <b>{money(CLAN_CREATE_PRICE)}</b>\n"
+        f"👥 Максимум участников: <b>{CLAN_MAX_MEMBERS}</b>\n\n"
+        "Напиши название клана от 3 до 24 символов.", parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@dp.message(ClanCreateState.name)
+async def clan_create_name(message: Message, state: FSMContext):
+    name = (message.text or "").strip()
+    clan, error = create_clan(message.from_user.id, name)
+    if error:
+        await message.answer(error)
+        return
+    await state.clear()
+    await message.answer(
+        f"🎉 <b>КЛАН СОЗДАН!</b>\n\n💀 Название: <b>{escape(clan['name'])}</b>\n"
+        f"👑 Ты владелец.\n💸 Списано: <b>{money(CLAN_CREATE_PRICE)}</b>",
+        reply_markup=my_clan_keyboard(message.from_user.id), parse_mode="HTML"
+    )
+
+
+@dp.callback_query(lambda c: c.data.startswith("clan:view:"))
+async def clan_view_callback(callback: CallbackQuery):
+    clan_id = int(callback.data.split(":")[2])
+    clan = get_clan_by_id(clan_id)
+    if not clan:
+        await callback.answer("❌ Клан не найден.", show_alert=True)
+        return
+    await callback.message.edit_text(clan_text(clan), reply_markup=clan_view_keyboard(clan_id, callback.from_user.id), parse_mode="HTML")
+    await callback.answer()
+
+
+@dp.callback_query(lambda c: c.data.startswith("clan:join:"))
+async def clan_join_callback(callback: CallbackQuery):
+    clan_id = int(callback.data.split(":")[2])
+    ok, error = join_clan(callback.from_user.id, clan_id)
+    if not ok:
+        await callback.answer(error, show_alert=True)
+        return
+    clan = get_clan_by_id(clan_id)
+    await callback.message.edit_text("✅ <b>Ты вступил в клан!</b>\n\n" + clan_text(clan), reply_markup=clan_view_keyboard(clan_id, callback.from_user.id), parse_mode="HTML")
+    await callback.answer("Добро пожаловать в клан!")
+
+
+@dp.callback_query(lambda c: c.data.startswith("clan:members:"))
+async def clan_members_callback(callback: CallbackQuery):
+    clan_id = int(callback.data.split(":")[2])
+    clan = get_clan_by_id(clan_id)
+    my_clan = get_user_clan(callback.from_user.id)
+    if not clan or not my_clan or my_clan["id"] != clan_id:
+        await callback.answer("❌ Ты не состоишь в этом клане.", show_alert=True)
+        return
+    await callback.message.edit_text(clan_members_text(clan), reply_markup=clan_members_keyboard(clan, callback.from_user.id), parse_mode="HTML")
+    await callback.answer()
+
+
+@dp.callback_query(lambda c: c.data.startswith("clan:kick:"))
+async def clan_kick_callback(callback: CallbackQuery):
+    target_id = int(callback.data.split(":")[2])
+    ok, error = kick_clan_member(callback.from_user.id, target_id)
+    if not ok:
+        await callback.answer(error, show_alert=True)
+        return
+    clan = get_user_clan(callback.from_user.id)
+    await callback.answer("✅ Игрок исключён.")
+    await callback.message.edit_text(clan_members_text(clan), reply_markup=clan_members_keyboard(clan, callback.from_user.id), parse_mode="HTML")
+
+
+@dp.callback_query(lambda c: c.data == "clan:leave")
+async def clan_leave_callback(callback: CallbackQuery):
+    ok, error = leave_clan(callback.from_user.id)
+    if not ok:
+        await callback.answer(error, show_alert=True)
+        return
+    await callback.message.edit_text(
+        "🚪 <b>Ты вышел из клана.</b>\n\nТеперь можешь вступить в другой или создать свой.",
+        reply_markup=my_clan_keyboard(callback.from_user.id), parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@dp.callback_query(lambda c: c.data == "clan:disband")
+async def clan_disband_callback(callback: CallbackQuery):
+    clan = get_user_clan(callback.from_user.id)
+    if not clan or clan["role"] != "owner":
+        await callback.answer("❌ Только владелец может расформировать клан.", show_alert=True)
+        return
+    ok, error = disband_clan(callback.from_user.id)
+    if not ok:
+        await callback.answer(error, show_alert=True)
+        return
+    await callback.message.edit_text("🗑 <b>Клан расформирован.</b>\n\nВсе участники были удалены из клана.", reply_markup=my_clan_keyboard(callback.from_user.id), parse_mode="HTML")
+    await callback.answer("Клан удалён")
+
+
+@dp.message(lambda m: m.text == "🔙 Назад")
+async def back_to_reference_menu(message: Message):
+    await message.answer(
+        "🏠 <b>Главное меню</b>",
+        reply_markup=main_keyboard(),
+        parse_mode="HTML"
+    )
+
 
 # =========================================================
 # CASES
@@ -801,8 +1679,6 @@ async def open_case(callback: CallbackQuery):
         return
     with db() as conn:
         conn.execute("UPDATE users SET balance=balance-?, cases_opened=cases_opened+1, last_case_opened=?, xp=xp+100 WHERE user_id=?", (CASE_PRICE, now, user_id))
-        add_monthly_xp(conn, user_id, 100)
-        add_monthly_case(conn, user_id)
         conn.execute("""
             INSERT INTO garage(user_id, car_id, amount) VALUES (?, ?, 1)
             ON CONFLICT(user_id, car_id) DO UPDATE SET amount=amount+1
@@ -810,12 +1686,22 @@ async def open_case(callback: CallbackQuery):
         row = conn.execute("SELECT amount FROM garage WHERE user_id=? AND car_id=?", (user_id, car["id"])).fetchone()
     r = RARITIES[car["rarity"]]
     duplicate = f"\n📦 Теперь этой машины: <b>{row['amount']} шт.</b>" if row and row["amount"] > 1 else "\n✨ Новая машина в коллекции!"
+    # Карточка выпадения в стиле, который ты показал на скриншоте.
+    # XP машины пока 10 для всех авто; цвет выбирается случайно.
+    car_xp = int(car.get("xp", 10))
+    car_color = random.choice(["Красный", "Черный", "Белый", "Синий", "Серый", "Зеленый"])
     result_text = (
-        "🎉 <b>КЕЙС ОТКРЫТ!</b>\n\n"
-        f"{r['emoji']} <b>{escape(car['rarity'])}</b>\n🚘 <b>{escape(car['name'])}</b>\n"
-        f"📅 {car['year']} год\n⚡ {car['power']} л.с.\n💎 Цена: <b>{money(car['price'])}</b>\n"
-        f"🎯 Шанс редкости: <b>{r['chance']}%</b>{duplicate}\n\n🏠 Машина добавлена в гараж."
-    )
+        f"🚘 <b>{escape(car['name'])} {car['year']}</b>\n\n"
+        f"<b>💎 Редкость:</b> {escape(car['rarity'])}\n"
+        f"<b>⚡️ Очки (XP):</b> {car_xp}\n"
+        f"<b>💴 Цена:</b> {int(car['price']):,}\n"
+        f"<b>🐴 Мощность:</b> {car['power']} л.с.\n"
+        f"<b>🎨 Цвет:</b> {car_color}\n"
+        f"<b>🏎 Тюнинг:</b> Нет\n"
+        f"<b>🔢 На учете:</b> Нет\n\n"
+        f"✨ {duplicate.strip()}\n"
+        "🏠 Машина добавлена в коллекцию."
+    ).replace(",", " ")
     if car.get("image_file_id"):
         await callback.message.answer_photo(car["image_file_id"], caption=result_text, parse_mode="HTML")
     else:
@@ -962,6 +1848,33 @@ async def garage(message: Message):
     await message.answer("🏠 <b>ТВОЙ ГАРАЖ</b>\n\nВыбери раздел:", reply_markup=garage_keyboard(), parse_mode="HTML")
 
 
+@dp.callback_query(lambda c: c.data.startswith("collection:page:"))
+async def collection_page_callback(callback: CallbackQuery):
+    page = int(callback.data.split(":")[2])
+    await show_collection(callback.message, callback.from_user.id, page, edit=True)
+    await callback.answer()
+
+
+@dp.callback_query(lambda c: c.data.startswith("collection:"))
+async def collection_action_callback(callback: CallbackQuery):
+    action = callback.data.split(":", 1)[1]
+    messages = {
+        "minus": "➖ Здесь можно будет уменьшать выбранное количество.",
+        "plus": "➕ Здесь можно будет увеличивать выбранное количество.",
+        "count": "📦 Счётчик показывает общее количество машин в твоём гараже.",
+        "rarity": "💎 Выбери редкость — фильтр по Common, Uncommon, Rare, Epic, Legendary, Exclusive и Secret.",
+        "brand": "🏷 Фильтр по брендам будет доступен после добавления брендов к машинам.",
+        "accounting": "🔢 Учет: показывает количество каждой машины в коллекции.",
+        "duplicates": "🟪 Дубли: здесь будут отображаться машины, которых у тебя больше одной.",
+        "seasons": "🍂 Сезоны: раздел для сезонных машин и коллекций.",
+        "search": "🔎 Поиск: используй поиск по названию машины.",
+        "selected": "🚫 Выбрано: выбранные машины пока не отмечены.",
+        "filters": "🚫 Фильтры: дополнительные фильтры коллекции пока не включены.",
+        "hide": "❌ Скрытие машин в коллекциях пока не включено.",
+    }
+    await callback.answer(messages.get(action, "Функция пока не подключена."), show_alert=True)
+
+
 @dp.callback_query(lambda c: c.data.startswith("garage:"))
 async def garage_filter(callback: CallbackQuery):
     rarity = callback.data.split(":", 1)[1]
@@ -1040,7 +1953,6 @@ async def daily_bonus(message: Message):
         streak = user["daily_streak"] + 1 if now-last <= 172800 else 1
         reward = min(2_000_000, 500_000 + (streak-1)*100_000)
         conn.execute("UPDATE users SET daily_last=?, daily_streak=?, balance=balance+?, xp=xp+50 WHERE user_id=?", (now, streak, reward, user_id))
-        add_monthly_xp(conn, user_id, 50)
     await message.answer(f"🎁 <b>БОНУС ПОЛУЧЕН!</b>\n\n💰 Награда: <b>{money(reward)}</b>\n🔥 Серия: <b>{streak}</b> дней\n⭐ +50 XP", parse_mode="HTML")
 
 
@@ -1132,69 +2044,6 @@ async def referral(message: Message):
     )
 
 
-async def send_monthly_report(bot, month=None):
-    if month is None:
-        now = datetime.now(KYIV_TZ)
-        year, mon = now.year, now.month
-        if mon == 1:
-            year, mon = year - 1, 12
-        else:
-            mon -= 1
-        month = f"{year:04d}-{mon:02d}"
-
-    with db() as conn:
-        already = conn.execute("SELECT 1 FROM monthly_reports WHERE month=?", (month,)).fetchone()
-        if already:
-            return False
-        rows = conn.execute("""
-            SELECT ms.user_id, ms.xp, ms.cases_opened, u.username, u.first_name
-            FROM monthly_stats ms
-            JOIN users u ON u.user_id = ms.user_id
-            WHERE ms.month=? AND (ms.xp > 0 OR ms.cases_opened > 0)
-            ORDER BY ms.xp DESC, ms.cases_opened DESC, ms.user_id ASC
-            LIMIT ?
-        """, (month, MONTHLY_TOP_LIMIT)).fetchall()
-        conn.execute("INSERT INTO monthly_reports(month, sent_at) VALUES (?, ?)", (month, time.time()))
-
-    if not rows:
-        text = f"🏆 <b>ИТОГИ ЗА {month}</b>\n\nЗа месяц активных игроков не было."
-    else:
-        text = f"🏆 <b>ТОП ИГРОКОВ ЗА {month}</b>\n\n"
-        for i, row in enumerate(rows, 1):
-            name = "@" + row["username"] if row["username"] else (row["first_name"] or f"ID {row['user_id']}")
-            text += (
-                f"{i}. <b>{escape(name)}</b> — ⭐ {row['xp']} XP"
-                f" • 🎁 {row['cases_opened']} кейсов"
-                f" • 🆔 <code>{row['user_id']}</code>\n"
-            )
-        text += (
-            "\n🎁 <b>ПРИЗЫ ЗА ТОП-3</b>\n"
-            "🥇 1 место — 🟡 <b>BMW M5 Competition</b> (Legendary)\n"
-            "🥈 2 место — 🟣 <b>Porsche 911 Turbo S</b> (Epic)\n"
-            "🥉 3 место — 🔵 <b>Nissan GT-R R35</b> (Rare)\n"
-            "\n📌 Выдай эти машины победителям через /admin → 🚘 Выдать машину."
-        )
-    try:
-        await bot.send_message(ADMIN_ID, text, parse_mode="HTML")
-        return True
-    except Exception:
-        with db() as conn:
-            conn.execute("DELETE FROM monthly_reports WHERE month=?", (month,))
-        logging.exception("Не удалось отправить ежемесячный топ")
-        return False
-
-
-async def monthly_report_loop(bot):
-    while True:
-        try:
-            now = datetime.now(KYIV_TZ)
-            if now.day == 1 and now.hour == 0 and now.minute < 5:
-                await send_monthly_report(bot)
-        except Exception:
-            logging.exception("Ошибка ежемесячного отчёта")
-        await asyncio.sleep(60)
-
-
 @dp.message(lambda m: m.text == "🏆 Лидеры")
 async def leaders(message: Message):
     with db() as conn:
@@ -1243,13 +2092,7 @@ async def admin_actions(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
         await callback.answer("⛔ Нет доступа", show_alert=True); return
     action = callback.data.split(":",1)[1]
-    if action == "monthly_top":
-        sent = await send_monthly_report(callback.bot)
-        await callback.message.answer(
-            "✅ Топ за предыдущий месяц отправлен тебе." if sent
-            else "ℹ️ Отчёт уже был отправлен или за прошлый месяц нет данных."
-        )
-    elif action == "stats":
+    if action == "stats":
         with db() as conn:
             users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
             cars = conn.execute("SELECT COALESCE(SUM(amount),0) FROM garage").fetchone()[0]
@@ -1434,10 +2277,20 @@ def run_web_server():
     port = int(os.environ.get("PORT", "10000"))
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
-            self.send_response(200)
+            # Render/внешний мониторинг может проверять / и /health.
+            # Важно: сам бот не может отменить автоматический sleep Free Web Service;
+            # для пробуждения Render нужен внешний HTTP-запрос.
+            if self.path in ("/", "/health", "/healthz"):
+                body = b"OK - Zona CarCase Bot is alive"
+                self.send_response(200)
+            else:
+                body = b"Not Found"
+                self.send_response(404)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(b"Zona CarCase V2 is running!")
+            self.wfile.write(body)
         def log_message(self, format, *args):
             pass
     server = HTTPServer(("0.0.0.0", port), Handler)
@@ -1445,25 +2298,106 @@ def run_web_server():
     server.serve_forever()
 
 
+async def run_bot_forever():
+    """
+    Бесконечный цикл запуска Telegram polling.
+    Если Telegram/сеть/Render временно оборвут соединение,
+    бот автоматически переподключится и продолжит работу.
+    """
+    reconnect_delay = 5
+
+    while True:
+        bot = None
+        auction_task = None
+        try:
+            # После любого переподключения перечитываем сохранённые данные из SQLite.
+            # Это не обнуляет базу — наоборот, гарантирует, что добавленные машины
+            # снова попадут в память после перезапуска polling.
+            init_db()
+            load_custom_cars()
+            logging.info("BOT: данные восстановлены | cars=%s | db=%s", len(CARS), os.path.abspath(DB_FILE))
+
+            bot = Bot(token=TOKEN)
+
+            # Сбрасываем старый webhook и все накопившиеся обновления.
+            await bot.delete_webhook(drop_pending_updates=True)
+
+            # Фоновый аукцион запускаем для каждого нового процесса polling.
+            auction_task = asyncio.create_task(auction_loop(bot))
+
+            logging.info("BOT: polling запущен")
+            await dp.start_polling(
+                bot,
+                polling_timeout=30,
+                handle_as_tasks=True,
+                allowed_updates=dp.resolve_used_update_types(),
+            )
+
+            # Если polling завершился без исключения — всё равно перезапускаем.
+            logging.warning("BOT: polling остановился, перезапуск через %s сек.", reconnect_delay)
+            reconnect_delay = 5
+
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logging.exception(
+                "BOT: соединение/поток polling завершился с ошибкой. "
+                "Перезапуск через %s сек.",
+                reconnect_delay,
+            )
+        finally:
+            if auction_task:
+                auction_task.cancel()
+                try:
+                    await auction_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    logging.exception("BOT: ошибка остановки auction_loop")
+
+            if bot:
+                try:
+                    await bot.session.close()
+                except Exception:
+                    pass
+
+        await asyncio.sleep(reconnect_delay)
+        reconnect_delay = min(reconnect_delay * 2, 60)
+
+
 async def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
     if not TOKEN:
         raise RuntimeError("Не найден BOT_TOKEN. Установи переменную окружения BOT_TOKEN.")
+
     init_db()
     load_custom_cars()
-    logging.info("Zona CarCase V3 | cars=%s | db=%s", len(CARS), os.path.abspath(DB_FILE))
-    bot = Bot(token=TOKEN)
-    await bot.delete_webhook(drop_pending_updates=True)
-    threading.Thread(target=run_web_server, daemon=True).start()
+
+    logging.info(
+        "Zona CarCase V3 | cars=%s | db=%s",
+        len(CARS),
+        os.path.abspath(DB_FILE),
+    )
+
+    # HTTP-сервер нужен Render: он слушает PORT и отвечает на health checks.
+    # На бесплатном Render внешний мониторинг может периодически обращаться к /health,
+    # но это не является гарантией непрерывной работы — сам Render может усыпить сервис.
+    threading.Thread(target=run_web_server, daemon=True, name="render-healthcheck").start()
+
     if not get_auction() and CARS_BY_RARITY.get("Exclusive"):
         start_new_auction()
-    asyncio.create_task(auction_loop(bot))
-    asyncio.create_task(monthly_report_loop(bot))
-    now = datetime.now(KYIV_TZ)
-    if now.day == 1:
-        await send_monthly_report(bot)
-    await dp.start_polling(bot)
+
+    # Главное: бот теперь сам переподключается при временных сбоях.
+    await run_bot_forever()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    while True:
+        try:
+            asyncio.run(main())
+        except KeyboardInterrupt:
+            logging.info("BOT: остановка вручную.")
+            break
+        except Exception:
+            logging.exception("BOT: критическая ошибка процесса. Перезапуск через 10 сек.")
+            time.sleep(10)
